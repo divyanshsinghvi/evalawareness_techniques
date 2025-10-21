@@ -76,7 +76,8 @@ class PromptRollout:
                 ],
                 temperature=0.7,
                 max_tokens=32000,
-                seed=seed
+                seed=seed,
+                extra_body={"think": True}
             )
 
             return {
