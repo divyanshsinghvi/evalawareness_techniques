@@ -3,8 +3,14 @@
 Run rollouts of extracted prompts through target models (async).
 
 Usage:
+    # OpenRouter (default)
     python run_prompt_rollouts.py --category behavioral_change --limit 5 --rollouts-per-prompt 3
-    python run_prompt_rollouts.py --input working/extracted_prompts/behavioral_change/*.yaml --rollouts-per-prompt 5 --seed 0
+
+    # Ollama (local)
+    python run_prompt_rollouts.py --model qwen3-235b-a22b-thinking --base-url http://localhost:11434/v1 --category behavioral_change --limit 5
+
+    # Custom API
+    python run_prompt_rollouts.py --model custom-model --base-url https://api.example.com/v1 --api-key YOUR_KEY
 
 Output filename format: {source_checksum}_{model}_{seed}.json
 """
@@ -26,15 +32,24 @@ load_dotenv()
 class PromptRollout:
     """Run extracted prompts through models (async)."""
 
-    def __init__(self, model: str = "qwen/qwen3-32b", output_dir: str = "suppression", concurrency: int = 5):
+    def __init__(self, model: str = "qwen/qwen3-32b", output_dir: str = "suppression", concurrency: int = 5,
+                 base_url: str = None, api_key: str = None):
         self.model = model
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.semaphore = asyncio.Semaphore(concurrency)
 
+        # Default to OpenRouter if no base_url provided
+        if base_url is None:
+            base_url = "https://openrouter.ai/api/v1"
+            api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        else:
+            # For Ollama or other local servers, use dummy key if none provided
+            api_key = api_key or "ollama"
+
         self.client = AsyncOpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.environ.get("OPENROUTER_API_KEY")
+            base_url=base_url,
+            api_key=api_key
         )
 
     def load_prompt_file(self, filepath: Path) -> Dict:
@@ -219,6 +234,7 @@ async def main_async(args):
     print("=" * 100)
     print()
     print(f"Model: {args.model}")
+    print(f"Base URL: {args.base_url or 'https://openrouter.ai/api/v1'}")
     print(f"Concurrency: {args.concurrency}")
     print(f"Rollouts per prompt: {args.rollouts_per_prompt}")
     print(f"Starting seed: {args.seed}")
@@ -234,7 +250,13 @@ async def main_async(args):
     print(f"Processing {len(files)} prompt files × {args.rollouts_per_prompt} rollouts = {total_possible} total")
     print()
 
-    runner = PromptRollout(model=args.model, output_dir=args.output_dir, concurrency=args.concurrency)
+    runner = PromptRollout(
+        model=args.model,
+        output_dir=args.output_dir,
+        concurrency=args.concurrency,
+        base_url=args.base_url,
+        api_key=args.api_key
+    )
 
     await process_files(files, runner, args.rollouts_per_prompt, args.seed)
 
@@ -261,6 +283,10 @@ def main():
                        help='Number of rollouts per prompt with different seeds (default: 1)')
     parser.add_argument('--seed', type=int, default=0,
                        help='Starting seed value (increments for each rollout, default: 0)')
+    parser.add_argument('--base-url',
+                       help='Base URL for API (default: OpenRouter, use http://localhost:11434/v1 for Ollama)')
+    parser.add_argument('--api-key',
+                       help='API key (default: OPENROUTER_API_KEY env var, or "ollama" for local)')
 
     args = parser.parse_args()
     asyncio.run(main_async(args))
