@@ -68,17 +68,23 @@ class PromptRollout:
         formatted_prompt = self.add_answer_format_instruction(user_prompt)
 
         async with self.semaphore:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
+            # Build kwargs for API call
+            api_kwargs = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": formatted_prompt}
                 ],
-                temperature=0.7,
-                max_tokens=32000,
-                seed=seed,
-                extra_body={"think": True}
-            )
+                "temperature": 0.7,
+                "max_tokens": 32000,
+                "seed": seed,
+            }
+
+            # Add think parameter for Ollama thinking models
+            # This enables the model's reasoning process
+            api_kwargs["extra_body"] = {"think": True}
+
+            response = await self.client.chat.completions.create(**api_kwargs)
 
             return {
                 'system_prompt': system_prompt,
