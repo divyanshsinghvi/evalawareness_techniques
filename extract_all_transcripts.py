@@ -24,8 +24,8 @@ def main():
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
 
-    # Find all transcript JSON files in working/
-    all_transcript_files = glob.glob('working/*/transcript_*.json')
+    # Find all transcript JSON files in working/ (including nested subdirectories)
+    all_transcript_files = glob.glob('working/**/transcript_*.json', recursive=True)
 
     # Skip extracted_prompts folder
     transcript_files = [f for f in all_transcript_files if 'extracted_prompts' not in Path(f).parts]
@@ -86,11 +86,13 @@ def main():
         checksum_short = file_hash[:8]
 
         # Determine output category based on source folder
-        if source_category == 'no_behavior_change':
+        # Handle naming variations
+        if source_category in ['no_behavior_change', 'not_behavior_change']:
             output_category = 'no_behavior_change'
-        elif source_category == 'not_working':
+        elif source_category in ['not_working', 'no_working']:
             output_category = 'not_working'
         else:
+            # behavior_change, behavioral_change, or anything else defaults to behavioral_change
             output_category = 'behavioral_change'
 
         # Create output directory
