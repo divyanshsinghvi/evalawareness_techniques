@@ -173,7 +173,7 @@ class PromptRollout:
                         {"role": "user", "content": formatted_prompt}
                     ],
                     "temperature": 0.7,
-                    "max_tokens": 32000,
+                    "max_tokens": 28000,
                     "seed": seed,
                 }
 
@@ -184,7 +184,7 @@ class PromptRollout:
                 # Force SiliconFlow provider for 235B thinking model (more reliable)
                 if "qwen3-235b-a22b-thinking" in self.model.lower():
                     extra_body["provider"] = {
-                        "order": ["SiliconFlow"],
+                        "order": ["SiliconFlow", "DeepInfra"],
                         "allow_fallbacks": False
                     }
 
