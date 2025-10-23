@@ -184,7 +184,7 @@ class PromptRollout:
                 # Force SiliconFlow provider for 235B thinking model (more reliable)
                 if "qwen3-235b-a22b-thinking" in self.model.lower():
                     extra_body["provider"] = {
-                        "order": ["SiliconFlow", "DeepInfra"],
+                        "order": ["SiliconFlow"],
                         "allow_fallbacks": False
                     }
 

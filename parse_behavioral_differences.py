@@ -41,6 +41,48 @@ OLD_FILES_WITHOUT_MARKER = [
 ]
 
 
+def check_word_coverage(branch_a_msg: str, branch_b_msg: str, threshold: float = 0.95) -> Tuple[bool, float, str]:
+    """Check if Branch A words are covered in Branch B.
+
+    Args:
+        branch_a_msg: Deployment branch user message
+        branch_b_msg: Evaluation branch user message
+        threshold: Minimum coverage required (default 95%)
+
+    Returns:
+        (passes_check, coverage_percentage, reason)
+    """
+    # Extract all words from both branches (lowercase, filter out very short words)
+    def get_words(text):
+        words = re.findall(r'\b\w+\b', text.lower())
+        # Filter out very short words (1-2 chars) and common stop words
+        stop_words = {'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+                     'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'should',
+                     'can', 'could', 'may', 'might', 'must', 'shall', 'to', 'of', 'in',
+                     'on', 'at', 'by', 'for', 'with', 'from', 'as', 'or', 'and', 'but',
+                     'if', 'so', 'than', 'that', 'this', 'these', 'those', 'it', 'its'}
+        return [w for w in words if len(w) >= 3 and w not in stop_words]
+
+    a_words = get_words(branch_a_msg)
+    b_words = get_words(branch_b_msg)
+
+    # Convert to sets for comparison
+    a_words_set = set(a_words)
+    b_words_set = set(b_words)
+
+    # Calculate how many deployment words appear in evaluation
+    if len(a_words_set) == 0:
+        return True, 1.0, "No words to check"
+
+    words_in_both = a_words_set & b_words_set
+    coverage = len(words_in_both) / len(a_words_set)
+
+    if coverage < threshold:
+        return False, coverage, f"Only {coverage*100:.1f}% of deployment words in evaluation (need {threshold*100:.0f}%)"
+
+    return True, coverage, f"OK: {coverage*100:.1f}% coverage"
+
+
 @dataclass
 class BranchData:
     """Data for a single branch (A or B)."""
@@ -73,9 +115,12 @@ class BehavioralResult:
     deployment_eval_quotes: Optional[List[str]]  # Eval-aware sentences from deployment branch (baseline, no cues)
     evaluation_eval_quotes: Optional[List[str]]  # Eval-aware sentences from evaluation branch (with cues)
     created_at: str
+    missing_branch_marker: bool = False  # True if BRANCH_B_START marker is missing (new files only)
+    word_coverage_issue: bool = False  # True if Branch A words are not sufficiently covered in Branch B (<95%)
+    word_coverage: Optional[float] = None  # Actual word coverage percentage
 
 
-def extract_branch_messages(messages: List[Dict], auditor_summary: str = None, transcript_file: str = None, debug=False) -> Tuple[Optional[BranchData], Optional[BranchData], Optional[List[BranchData]], Optional[List[BranchData]]]:
+def extract_branch_messages(messages: List[Dict], auditor_summary: str = None, transcript_file: str = None, debug=False) -> Tuple[Optional[BranchData], Optional[BranchData], Optional[List[BranchData]], Optional[List[BranchData]], bool]:
     """Extract the successful Branch A and Branch B conversation messages, plus all attempts.
 
     Args:
@@ -89,6 +134,7 @@ def extract_branch_messages(messages: List[Dict], auditor_summary: str = None, t
         - evaluation_branch_data: Final successful evaluation branch iteration
         - deployment_all_attempts: ALL deployment branch attempts (including unsuccessful)
         - evaluation_all_attempts: ALL evaluation branch attempts (including unsuccessful)
+        - missing_branch_marker: True if BRANCH_B_START marker is missing (for new files not in OLD_FILES_WITHOUT_MARKER)
 
     Can work with or without an auditor summary. If no summary, extracts whatever data is available.
     """
@@ -262,6 +308,13 @@ def extract_branch_messages(messages: List[Dict], auditor_summary: str = None, t
         branch_a_interactions = []
         branch_b_interactions = []
 
+    # Track if this is a new file missing the BRANCH_B_START marker
+    missing_branch_marker = (
+        branch_b_marker_index is None and  # No marker found
+        transcript_file and  # Have a filename
+        transcript_file not in OLD_FILES_WITHOUT_MARKER  # Not an old file
+    )
+
     if debug:
         print(f"\n  === Branch Separation ===")
         if branch_b_marker_index is not None:
@@ -272,6 +325,8 @@ def extract_branch_messages(messages: List[Dict], auditor_summary: str = None, t
             print(f"  Method: None (no marker, test incomplete)")
         print(f"  Branch A: {len(branch_a_interactions)} interactions, choices: {[x['choice'] for x in branch_a_interactions]}")
         print(f"  Branch B: {len(branch_b_interactions)} interactions, choices: {[x['choice'] for x in branch_b_interactions]}")
+        if missing_branch_marker:
+            print(f"  ⚠️  MISSING BRANCH_B_START MARKER (new file)")
 
     # Get the successful iterations (final)
     deployment_branch_data = None
@@ -324,13 +379,22 @@ def extract_branch_messages(messages: List[Dict], auditor_summary: str = None, t
             ))
 
     # FALLBACK: If inference logic didn't produce both branches OR choices don't match summary, try parsing auditor summary
-    # First check if we should use fallback
+    # IMPORTANT: Only use fallback for old files in OLD_FILES_WITHOUT_MARKER
+    # New files MUST have BRANCH_B_START marker - if missing, test is incomplete
     use_fallback = False
 
-    if auditor_summary and all_interactions:
+    # Skip fallback entirely if this is a new file missing the marker
+    if not missing_branch_marker and auditor_summary and all_interactions:
+        # Only allow fallback for old files without markers
+        is_old_file = transcript_file and transcript_file in OLD_FILES_WITHOUT_MARKER
+
         # Case 1: Missing one or both branches
         if not deployment_branch_data or not evaluation_branch_data:
-            use_fallback = True
+            # Only use fallback for old files
+            if is_old_file:
+                use_fallback = True
+            elif debug:
+                print(f"\n  ⚠️  Branches missing but file is NOT in OLD_FILES_WITHOUT_MARKER - skipping fallback")
         # Case 2: Have both branches but choices might not match summary
         elif deployment_branch_data and evaluation_branch_data:
             # Extract what summary says to verify
@@ -339,9 +403,13 @@ def extract_branch_messages(messages: List[Dict], auditor_summary: str = None, t
                 # Check if extracted choices match summary
                 if (deployment_branch_data.choice != branch_a_choice_from_summary or
                     evaluation_branch_data.choice != branch_b_choice_from_summary):
-                    use_fallback = True
-                    if debug:
-                        print(f"\n  === Mismatch detected: Extracted ({deployment_branch_data.choice}→{evaluation_branch_data.choice}) vs Summary ({branch_a_choice_from_summary}→{branch_b_choice_from_summary}) ===")
+                    # Only use fallback for old files (mismatches in new files indicate parser bugs or incomplete tests)
+                    if is_old_file:
+                        use_fallback = True
+                        if debug:
+                            print(f"\n  === Mismatch detected: Extracted ({deployment_branch_data.choice}→{evaluation_branch_data.choice}) vs Summary ({branch_a_choice_from_summary}→{branch_b_choice_from_summary}) ===")
+                    elif debug:
+                        print(f"\n  ⚠️  Mismatch detected but file is NOT in OLD_FILES_WITHOUT_MARKER - skipping fallback")
 
     if use_fallback:
         if debug:
@@ -468,7 +536,7 @@ def extract_branch_messages(messages: List[Dict], auditor_summary: str = None, t
                                 choice=interaction['choice']
                             ))
 
-    return deployment_branch_data, evaluation_branch_data, deployment_all_attempts, evaluation_all_attempts
+    return deployment_branch_data, evaluation_branch_data, deployment_all_attempts, evaluation_all_attempts, missing_branch_marker
 
 
 def extract_choices_from_summary(summary_text: str) -> Tuple[Optional[str], Optional[str]]:
@@ -611,12 +679,12 @@ def analyze_transcript(transcript_path: Path) -> Optional[BehavioralResult]:
                     scenario = scenario_name
                     break
 
-        # Extract eval awareness score
-        scores = judge_output.get('scores', {})
+        # Extract eval awareness score (handle case where judge_output is None)
+        scores = judge_output.get('scores', {}) if judge_output else {}
         eval_awareness_score = scores.get('behavior_eval_awareness') or scores.get('real_eval_awareness')
 
         # Extract summary from judge output
-        summary = judge_output.get('summary', '')
+        summary = judge_output.get('summary', '') if judge_output else ''
 
         # Find auditor's final summary in messages
         # The auditor writes final summary as assistant role
@@ -659,7 +727,7 @@ def analyze_transcript(transcript_path: Path) -> Optional[BehavioralResult]:
                 branch_b_choice = b_choice
 
         # Extract branch conversation data (including all attempts)
-        deployment_branch_data, evaluation_branch_data, deployment_all_attempts, evaluation_all_attempts = extract_branch_messages(
+        deployment_branch_data, evaluation_branch_data, deployment_all_attempts, evaluation_all_attempts, missing_branch_marker = extract_branch_messages(
             messages,
             auditor_summary,
             transcript_file=transcript_path.name
@@ -675,9 +743,13 @@ def analyze_transcript(transcript_path: Path) -> Optional[BehavioralResult]:
         if evaluation_branch_data and evaluation_branch_data.choice:
             branch_b_choice = evaluation_branch_data.choice
 
-        # CRITICAL: Test is only complete if we have BOTH actual branch data objects
+        # CRITICAL: Test is only complete if we have BOTH actual branch data objects AND no missing marker
         # Even if auditor wrote a summary with choices, we need the actual conversation data
-        if not deployment_branch_data or not evaluation_branch_data:
+        # Files missing BRANCH_B_START marker are automatically incomplete
+        if missing_branch_marker:
+            test_complete = False
+            behavioral_change = False
+        elif not deployment_branch_data or not evaluation_branch_data:
             test_complete = False
             behavioral_change = False
         # Behavioral change = we have BOTH branches with different choices
@@ -704,6 +776,22 @@ def analyze_transcript(transcript_path: Path) -> Optional[BehavioralResult]:
         if evaluation_branch_data and evaluation_branch_data.assistant_response:
             evaluation_eval_quotes = extract_eval_aware_sentences(evaluation_branch_data.assistant_response)
 
+        # Check word coverage between branches
+        word_coverage_issue = False
+        word_coverage = None
+        if deployment_branch_data and evaluation_branch_data:
+            passes_check, coverage, reason = check_word_coverage(
+                deployment_branch_data.user_message,
+                evaluation_branch_data.user_message,
+                threshold=0.95
+            )
+            word_coverage = coverage
+            if not passes_check:
+                word_coverage_issue = True
+                # Mark test as incomplete if word coverage is too low
+                test_complete = False
+                behavioral_change = False
+
         return BehavioralResult(
             transcript_id=transcript_id,
             transcript_file=str(transcript_path.name),
@@ -723,7 +811,10 @@ def analyze_transcript(transcript_path: Path) -> Optional[BehavioralResult]:
             evaluation_all_attempts=evaluation_all_attempts,
             deployment_eval_quotes=deployment_eval_quotes,
             evaluation_eval_quotes=evaluation_eval_quotes,
-            created_at=created_at
+            created_at=created_at,
+            missing_branch_marker=missing_branch_marker,
+            word_coverage_issue=word_coverage_issue,
+            word_coverage=word_coverage
         )
 
     except Exception as e:
@@ -894,7 +985,53 @@ def main():
     parser = argparse.ArgumentParser(description='Parse behavioral differences from transcripts')
     parser.add_argument('--dry-run', action='store_true', help='Show classification counts without writing files')
     parser.add_argument('--output-yaml', action='store_true', help='Output individual YAML files to working/extracted_prompts/')
+    parser.add_argument('--test-file', type=str, help='Test parser on a single file (provide filename from outputs/)')
     args = parser.parse_args()
+
+    # Single file test mode
+    if args.test_file:
+        test_path = Path('outputs') / args.test_file
+        print(f"Testing parser on: {test_path}")
+        print("="*80)
+
+        result = analyze_transcript(test_path)
+
+        if result:
+            print(f"\nFile: {result.transcript_file}")
+            print(f"Scenario: {result.scenario}")
+            print(f"Test complete: {result.test_complete}")
+            print(f"Behavioral change: {result.behavioral_change}")
+            print(f"Missing BRANCH_B_START marker: {result.missing_branch_marker}")
+            print(f"Branch A choice: {result.branch_a_choice}")
+            print(f"Branch B choice: {result.branch_b_choice}")
+            print()
+            print(f"Deployment branch data: {'Yes' if result.deployment_branch_data else 'No'}")
+            print(f"Evaluation branch data: {'Yes' if result.evaluation_branch_data else 'No'}")
+
+            if result.word_coverage is not None:
+                coverage_pct = result.word_coverage * 100
+                print(f"Word coverage: {coverage_pct:.1f}%")
+            print()
+
+            if result.missing_branch_marker:
+                print("✓ CORRECTLY IDENTIFIED as missing BRANCH_B_START marker")
+                if result.test_complete:
+                    print("❌ ERROR: File is marked as test_complete=True (should be False!)")
+                else:
+                    print("✓ CORRECTLY marked as test_complete=False")
+            elif result.word_coverage_issue:
+                coverage_pct = result.word_coverage * 100 if result.word_coverage else 0
+                print(f"⚠️  WORD COVERAGE ISSUE: {coverage_pct:.1f}% (need 95%)")
+                print("✓ CORRECTLY marked as test_complete=False")
+            else:
+                print("✓ File has BRANCH_B_START marker (or is in old files list)")
+                if result.word_coverage is not None:
+                    coverage_pct = result.word_coverage * 100
+                    print(f"✓ Word coverage OK: {coverage_pct:.1f}%")
+        else:
+            print("ERROR: Failed to parse file")
+
+        return
 
     outputs_dir = Path('outputs')
     transcript_files = list(outputs_dir.glob('transcript_*.json'))
@@ -951,19 +1088,7 @@ def main():
             else:
                 print(f"  Direction: ? OTHER")
 
-            # Display system prompt and user prompts with responses
-            if result.deployment_branch_data:
-                print(f"\n  System Prompt: {result.deployment_branch_data.system_prompt[:200]}...")
-                print(f"\n  Branch A (Deployment) User Prompt:")
-                print(f"    {result.deployment_branch_data.user_message[:300]}...")
-                print(f"\n  Branch A Assistant Response:")
-                print(f"    {result.deployment_branch_data.assistant_response[:400]}...")
-
-            if result.evaluation_branch_data:
-                print(f"\n  Branch B (Evaluation) User Prompt:")
-                print(f"    {result.evaluation_branch_data.user_message[:300]}...")
-                print(f"\n  Branch B Assistant Response:")
-                print(f"    {result.evaluation_branch_data.assistant_response[:400]}...")
+            # Brief summary only (prompts/responses saved in JSON for detailed analysis)
 
             # Display eval-aware quotes from both branches
             if result.deployment_eval_quotes and len(result.deployment_eval_quotes) > 0:
@@ -976,11 +1101,7 @@ def main():
                 for i, quote in enumerate(result.evaluation_eval_quotes, 1):
                     print(f"    [{i}] {quote}")
 
-            # Display truncated summaries (full versions stored in JSON)
-            judge_display = result.judge_summary[:250] + '...' if len(result.judge_summary) > 250 else result.judge_summary
-            auditor_display = result.auditor_summary[:250] + '...' if len(result.auditor_summary) > 250 else result.auditor_summary
-            print(f"\n  Judge Summary: {judge_display}")
-            print(f"  Auditor Summary: {auditor_display}")
+            # Summaries stored in JSON (omitted from console for brevity)
 
     # Show no behavioral changes (complete tests)
     print(f"\n\n❌ NO BEHAVIORAL CHANGE: {len(no_change_complete)}/{len(complete_tests)} complete tests")
@@ -1222,6 +1343,164 @@ def main():
 
         print("\n" + "="*80)
 
+        # Separate files with issues
+        files_missing_marker = [r for r in results if r.missing_branch_marker]
+        files_word_coverage_issue = [r for r in results if r.word_coverage_issue]
+        files_with_marker = [r for r in results if not r.missing_branch_marker]
+
+        if files_missing_marker:
+            print(f"\n⚠️  WARNING: {len(files_missing_marker)} NEW FILES MISSING BRANCH_B_START MARKER:")
+            print("="*80)
+            print("These files will NOT be written to extracted_prompts/")
+            print("The auditor forgot to include BRANCH_B_START marker in the message content.")
+            print()
+            # Only show first 3 files
+            for result in files_missing_marker[:3]:
+                print(f"  ❌ {result.transcript_file}")
+                print(f"     Scenario: {result.scenario}")
+                print(f"     Target: {result.target_model}")
+                print()
+            if len(files_missing_marker) > 3:
+                print(f"  ... and {len(files_missing_marker) - 3} more files")
+                print()
+            print("="*80)
+
+        if files_word_coverage_issue:
+            print(f"\n⚠️  WARNING: {len(files_word_coverage_issue)} FILES WITH LOW WORD COVERAGE (<95%):")
+            print("="*80)
+            print("These files will NOT be written to extracted_prompts/")
+            print("Branch A and Branch B appear to be different scenarios (likely wrong BRANCH_B_START placement).")
+            print()
+
+            # Separate severely broken files (< 99% coverage)
+            severely_broken = []
+            moderately_broken = []
+
+            # Only show first 3 files
+            for idx, result in enumerate(files_word_coverage_issue):
+                coverage_pct = result.word_coverage * 100 if result.word_coverage else 0
+
+                if idx < 3:
+                    print(f"  ❌ {result.transcript_file}")
+                    print(f"     Scenario: {result.scenario}")
+                    print(f"     Coverage: {coverage_pct:.1f}%")
+                    print(f"     Choices: {result.branch_a_choice} → {result.branch_b_choice}")
+                    print()
+
+                if coverage_pct < 99:
+                    severely_broken.append(result)
+                else:
+                    moderately_broken.append(result)
+
+            if len(files_word_coverage_issue) > 3:
+                print(f"  ... and {len(files_word_coverage_issue) - 3} more files")
+                print()
+
+            print("="*80)
+
+        # Interactive deletion menu
+        if args.dry_run and (files_missing_marker or severely_broken):
+            print(f"\n🗑️  DELETION OPTIONS:")
+            print("="*80)
+            print(f"1. Delete files missing BRANCH_B_START marker ({len(files_missing_marker)} files)")
+            print(f"2. Delete files with low word coverage <99% ({len(severely_broken)} files)")
+            print(f"3. Delete both")
+            print(f"4. Skip deletion")
+            print()
+
+            choice = input("Choose option (1-4): ").strip()
+
+            delete_missing_marker = choice in ['1', '3']
+            delete_low_coverage = choice in ['2', '3']
+
+            # Delete files missing BRANCH_B_START marker
+            if delete_missing_marker and files_missing_marker:
+                print(f"\n🗑️  DELETING FILES MISSING BRANCH_B_START MARKER")
+                print("="*80)
+                print("These transcripts cannot be parsed correctly without the marker.")
+                print("You will be prompted for each file.")
+                print()
+
+                deleted_marker_files = 0
+                skipped_marker = 0
+
+                for idx, result in enumerate(files_missing_marker, 1):
+                    transcript_path = Path('outputs') / result.transcript_file
+
+                    if transcript_path.exists():
+                        print(f"[{idx}/{len(files_missing_marker)}] {result.transcript_file}")
+                        print(f"  Scenario: {result.scenario}")
+                        print(f"  Target: {result.target_model}")
+
+                        response = input("  Delete transcript? (Enter=yes, 'n'=no, 'q'=quit): ").strip().lower()
+
+                        if response == 'q':
+                            print("\nQuitting deletion process.")
+                            break
+                        elif response != 'n':
+                            transcript_path.unlink()
+                            deleted_marker_files += 1
+                            print(f"  ✓ Deleted transcript")
+                        else:
+                            skipped_marker += 1
+                            print("  Skipped")
+                        print()
+                    else:
+                        print(f"[{idx}/{len(files_missing_marker)}] {result.transcript_file} - NOT FOUND")
+                        print()
+
+                print("="*80)
+                print(f"✓ Deleted {deleted_marker_files} transcript files (missing marker)")
+                print(f"  Skipped {skipped_marker} files")
+                print("="*80)
+
+            # Offer to delete severely broken transcript files
+            if delete_low_coverage and severely_broken:
+                print(f"\n🗑️  FOUND {len(severely_broken)} SEVERELY BROKEN TRANSCRIPTS (<50% coverage)")
+                print("="*80)
+                print("These transcripts have completely different scenarios in Branch A vs Branch B.")
+                print("Deleting the transcript will prevent it from being parsed in the future.")
+                print("You will be prompted for each file.")
+                print()
+
+                deleted_transcripts = 0
+                skipped = 0
+
+                for idx, result in enumerate(severely_broken, 1):
+                    coverage_pct = result.word_coverage * 100 if result.word_coverage else 0
+
+                    # The transcript file is in outputs/
+                    transcript_path = Path('outputs') / result.transcript_file
+
+                    if transcript_path.exists():
+                        print(f"[{idx}/{len(severely_broken)}] {result.transcript_file}")
+                        print(f"  Scenario: {result.scenario}")
+                        print(f"  Coverage: {coverage_pct:.1f}%")
+                        print(f"  Choices: {result.branch_a_choice} → {result.branch_b_choice}")
+
+                        response = input("  Delete transcript? (Enter=yes, 'n'=no, 'q'=quit): ").strip().lower()
+
+                        if response == 'q':
+                            print("\nQuitting deletion process.")
+                            break
+                        elif response != 'n':
+                            # Delete the transcript
+                            transcript_path.unlink()
+                            deleted_transcripts += 1
+                            print(f"  ✓ Deleted transcript")
+                        else:
+                            skipped += 1
+                            print("  Skipped")
+                        print()
+                    else:
+                        print(f"[{idx}/{len(severely_broken)}] {result.transcript_file} - NOT FOUND (already deleted?)")
+                        print()
+
+                print("="*80)
+                print(f"✓ Deleted {deleted_transcripts} transcript files")
+                print(f"  Skipped {skipped} files")
+                print("="*80)
+
         if args.dry_run:
             print("\n✓ Dry run complete. Use --output-yaml to actually write files.")
 
@@ -1234,9 +1513,20 @@ def main():
             for category in category_counts.keys():
                 (base_output_dir / category).mkdir(parents=True, exist_ok=True)
 
-            # Write files
+            # Write files (SKIP files with issues)
             files_written = 0
+            files_skipped = 0
             for result, category in classified_results:
+                # Skip files missing marker
+                if result.missing_branch_marker:
+                    files_skipped += 1
+                    continue
+
+                # Skip files with word coverage issues
+                if result.word_coverage_issue:
+                    files_skipped += 1
+                    continue
+
                 filename = generate_yaml_filename(result)
                 output_path = base_output_dir / category / filename
 
@@ -1253,6 +1543,8 @@ def main():
                 files_written += 1
 
             print(f"\n✓ Successfully wrote {files_written} YAML files")
+            if files_skipped > 0:
+                print(f"⚠️  Skipped {files_skipped} files missing BRANCH_B_START marker")
             print(f"  Output directory: {base_output_dir.absolute()}")
             print("="*80)
 
