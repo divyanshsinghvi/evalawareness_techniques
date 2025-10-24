@@ -1418,6 +1418,7 @@ def main():
                 print()
             print("="*80)
 
+        severely_broken = []
         if files_word_coverage_issue:
             print(f"\n⚠️  WARNING: {len(files_word_coverage_issue)} FILES WITH LOW WORD COVERAGE (<95%):")
             print("="*80)

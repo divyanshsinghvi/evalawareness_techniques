@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Find and delete incorrectly parsed extracted prompts where Branch 1 and B have different scenarios.
+Find and delete incorrectly parsed extracted prompts where Branch 1 and 2 have different scenarios.
 Interactive mode - asks for each file.
 """
 
