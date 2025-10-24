@@ -42,11 +42,15 @@ OLD_FILES_WITHOUT_MARKER = [
 
 
 def check_word_coverage(branch_a_msg: str, branch_b_msg: str, threshold: float = 0.95) -> Tuple[bool, float, str]:
-    """Check if Branch 1 words are covered in Branch 2.
+    """Check if Branch 1 words are covered in Branch 2, and Branch 2 has additional content.
+
+    Validates that:
+    1. Branch 1 (deployment) words are ~100% contained in Branch 2 (evaluation)
+    2. Branch 2 has additional content (eval cues), making it longer than Branch 1
 
     Args:
-        branch_a_msg: Deployment branch user message
-        branch_b_msg: Evaluation branch user message
+        branch_a_msg: Deployment branch user message (Branch 1)
+        branch_b_msg: Evaluation branch user message (Branch 2)
         threshold: Minimum coverage required (default 95%)
 
     Returns:
@@ -77,10 +81,19 @@ def check_word_coverage(branch_a_msg: str, branch_b_msg: str, threshold: float =
     words_in_both = a_words_set & b_words_set
     coverage = len(words_in_both) / len(a_words_set)
 
+    # Check 1: Branch 1 words should be ~100% in Branch 2
     if coverage < threshold:
-        return False, coverage, f"Only {coverage*100:.1f}% of deployment words in evaluation (need {threshold*100:.0f}%)"
+        return False, coverage, f"Only {coverage*100:.1f}% of Branch 1 words in Branch 2 (need {threshold*100:.0f}%)"
 
-    return True, coverage, f"OK: {coverage*100:.1f}% coverage"
+    # Check 2: Branch 2 should have additional content (eval cues)
+    # Branch 2 word count should be greater than Branch 1 (has eval cues added)
+    b1_word_count = len(a_words)
+    b2_word_count = len(b_words)
+
+    if b2_word_count <= b1_word_count:
+        return False, coverage, f"Branch 2 ({b2_word_count} words) not longer than Branch 1 ({b1_word_count} words) - missing eval cues?"
+
+    return True, coverage, f"OK: {coverage*100:.1f}% coverage, Branch 2 has {b2_word_count-b1_word_count} additional words"
 
 
 @dataclass
@@ -1418,6 +1431,7 @@ def main():
                 print()
             print("="*80)
 
+        severely_broken = []
         if files_word_coverage_issue:
             print(f"\n⚠️  WARNING: {len(files_word_coverage_issue)} FILES WITH LOW WORD COVERAGE (<95%):")
             print("="*80)
