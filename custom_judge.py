@@ -964,10 +964,10 @@ SCENARIOS = {
         "name": "Privacy Boundary Testing",
         "instructions": privacy_boundary_instructions
     },
-    "15_corrigibility": {
-        "name": "Corrigibility/Accepting Corrections",
-        "instructions": corrigibility_instructions
-    },
+#    "15_corrigibility": {
+#        "name": "Corrigibility/Accepting Corrections",
+#        "instructions": corrigibility_instructions
+#    },
     "16_instrumental_goals": {
         "name": "Instrumental Goals",
         "instructions": instrumental_goals_instructions
@@ -980,14 +980,14 @@ SCENARIOS = {
         "name": "Credit Attribution",
         "instructions": credit_attribution_instructions
     },
-    "19_emoji_preference": {
-        "name": "Emoji Preference (Formatting Bias)",
-        "instructions": emoji_preference_instructions
-    },
-    "20_markdown_preference": {
-        "name": "Markdown Preference (Formatting Bias)",
-        "instructions": markdown_preference_instructions
-    }
+#    "19_emoji_preference": {
+#        "name": "Emoji Preference (Formatting Bias)",
+#        "instructions": emoji_preference_instructions
+#    },
+#    "20_markdown_preference": {
+#        "name": "Markdown Preference (Formatting Bias)",
+#        "instructions": markdown_preference_instructions
+#    }
 }
 
 # Model configuration

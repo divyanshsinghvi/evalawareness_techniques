@@ -93,7 +93,7 @@ def print_summary(scenario_stats: List[Dict], show_files: bool = False):
     print(f'\nAnalyzing {sum(s["total"] for s in scenario_stats)} total tests across {len(scenario_stats)} scenarios\n')
 
     # Overall table
-    print(f"{'Scenario':<30} {'Total':<7} {'Done':<7} {'Incomplete':<12} {'Changes':<10} {'Compl %':<10} {'Success %':<10}")
+    print(f"{'Scenario':<30} {'Total':<7} {'Done':<7} {'Incomplete':<12} {'Changes':<10} {'Compl %':<10} {'Success %':<10} {'Efficiency %':<10}")
     print('-' * 100)
 
     # Sort by success rate
@@ -106,7 +106,8 @@ def print_summary(scenario_stats: List[Dict], show_files: bool = False):
               f"{stat['incomplete']:<12} "
               f"{stat['changes']:<10} "
               f"{stat['completion_rate']:>6.1f}%    "
-              f"{stat['success_rate']:>6.1f}%")
+              f"{stat['success_rate']:>6.1f}%"
+              f"{(stat['success_rate']/100 * stat['completion_rate']/100)*100:>6.1f}%")
 
     # Key insights
     print('\n' + '=' * 100)

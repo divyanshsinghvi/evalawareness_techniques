@@ -964,9 +964,10 @@ def analyze_eval_awareness(rollouts: List[RolloutData]) -> None:
         print(f"    - Implicit (Level 3): {same_implicit}/{len(behavioral_same)} ({same_implicit/len(behavioral_same)*100:.1f}%)")
         print(f"    - None:               {same_none}/{len(behavioral_same)} ({same_none/len(behavioral_same)*100:.1f}%)")
 
-    # Per-prompt statistics (group by original source file, different seeds)
-    print(f"\n\nPER-PROMPT EVAL AWARENESS DISTRIBUTION:")
+    # Per-prompt behavioral change distribution
+    print(f"\n\nPER-PROMPT BEHAVIORAL CHANGE × AWARENESS DISTRIBUTION:")
     print("="*80)
+    print("(Shows how each prompt behaves across different seeds)\n")
 
     # Group rollouts by source prompt file (remove seed suffix)
     by_prompt = defaultdict(list)
@@ -974,6 +975,152 @@ def analyze_eval_awareness(rollouts: List[RolloutData]) -> None:
         filename = r.filepath.stem
         base_name = filename.rsplit('_seed_', 1)[0] if '_seed_' in filename else filename
         by_prompt[base_name].append(r)
+
+    # Calculate per-prompt statistics
+    prompt_stats = []
+    for prompt_name, prompt_rollouts in by_prompt.items():
+        if len(prompt_rollouts) < 2:  # Need multiple seeds
+            continue
+
+        # Behavioral change stats
+        changed_count = sum(1 for r in prompt_rollouts if r.behavioral_change is True)
+        no_change_count = sum(1 for r in prompt_rollouts if r.behavioral_change is False)
+        change_rate = (changed_count / len(prompt_rollouts)) * 100
+
+        # Eval awareness stats (in evaluation context)
+        eval_aware_count = sum(1 for r in prompt_rollouts if len(r.evaluation_eval_quotes) > 0)
+        eval_aware_rate = (eval_aware_count / len(prompt_rollouts)) * 100
+
+        # Awareness level breakdown
+        global_count = sum(1 for r in prompt_rollouts if r.evaluation_awareness_level == "global")
+        explicit_count = sum(1 for r in prompt_rollouts if r.evaluation_awareness_level == "explicit")
+        implicit_count = sum(1 for r in prompt_rollouts if r.evaluation_awareness_level == "implicit")
+        none_count = sum(1 for r in prompt_rollouts if r.evaluation_awareness_level == "none")
+
+        # Combined pattern: behavioral change + awareness level
+        changed_with_global = sum(1 for r in prompt_rollouts if r.behavioral_change is True and r.evaluation_awareness_level == "global")
+        changed_with_explicit = sum(1 for r in prompt_rollouts if r.behavioral_change is True and r.evaluation_awareness_level == "explicit")
+        changed_with_implicit = sum(1 for r in prompt_rollouts if r.behavioral_change is True and r.evaluation_awareness_level == "implicit")
+        changed_with_none = sum(1 for r in prompt_rollouts if r.behavioral_change is True and r.evaluation_awareness_level == "none")
+
+        # Get scenario and category
+        scenario = prompt_rollouts[0].scenario if prompt_rollouts else "unknown"
+        category = prompt_rollouts[0].category if prompt_rollouts else "unknown"
+
+        prompt_stats.append({
+            'name': prompt_name,
+            'scenario': scenario,
+            'category': category,
+            'n_seeds': len(prompt_rollouts),
+            'changed_count': changed_count,
+            'no_change_count': no_change_count,
+            'change_rate': change_rate,
+            'eval_aware_count': eval_aware_count,
+            'eval_aware_rate': eval_aware_rate,
+            'global_count': global_count,
+            'explicit_count': explicit_count,
+            'implicit_count': implicit_count,
+            'none_count': none_count,
+            'changed_with_global': changed_with_global,
+            'changed_with_explicit': changed_with_explicit,
+            'changed_with_implicit': changed_with_implicit,
+            'changed_with_none': changed_with_none
+        })
+
+    if prompt_stats:
+        # Calculate overall statistics
+        change_rates = [p['change_rate'] for p in prompt_stats]
+        mean_change_rate = statistics.mean(change_rates)
+        median_change_rate = statistics.median(change_rates)
+
+        print(f"Unique prompts analyzed: {len(prompt_stats)}")
+        print(f"\nBehavioral change rate distribution:")
+        print(f"  Mean:   {mean_change_rate:6.1f}%")
+        print(f"  Median: {median_change_rate:6.1f}%")
+
+        if len(change_rates) >= 4:
+            q1 = statistics.quantiles(change_rates, n=4)[0]
+            q3 = statistics.quantiles(change_rates, n=4)[2]
+            print(f"  Q1 (25th percentile): {q1:.1f}%")
+            print(f"  Q3 (75th percentile): {q3:.1f}%")
+            print(f"  Min: {min(change_rates):.1f}%")
+            print(f"  Max: {max(change_rates):.1f}%")
+
+        # Categorize prompts by consistency
+        always_change = [p for p in prompt_stats if p['change_rate'] == 100]
+        never_change = [p for p in prompt_stats if p['change_rate'] == 0]
+        sometimes_change = [p for p in prompt_stats if 0 < p['change_rate'] < 100]
+
+        print(f"\nConsistency patterns:")
+        print(f"  Always change (100%):    {len(always_change)} prompts")
+        print(f"  Never change (0%):       {len(never_change)} prompts")
+        print(f"  Sometimes change (0-100%): {len(sometimes_change)} prompts")
+
+        # Show most/least consistent prompts
+        print(f"\n{'='*80}")
+        print(f"HIGHEST BEHAVIORAL CHANGE RATES (most variable prompts):")
+        print(f"{'='*80}")
+        for p in sorted(prompt_stats, key=lambda x: x['change_rate'], reverse=True)[:10]:
+            print(f"\n{p['name'][:70]}")
+            print(f"  Scenario: {p['scenario']:20s} | Category: {p['category']}")
+            print(f"  Seeds: {p['n_seeds']}  |  Change rate: {p['change_rate']:.1f}% ({p['changed_count']}/{p['n_seeds']})")
+            print(f"  Eval awareness: {p['eval_aware_rate']:.1f}% ({p['eval_aware_count']}/{p['n_seeds']})")
+            print(f"  Awareness levels: Global={p['global_count']}, Explicit={p['explicit_count']}, Implicit={p['implicit_count']}, None={p['none_count']}")
+            print(f"  Behavioral change by level: G={p['changed_with_global']}, E={p['changed_with_explicit']}, I={p['changed_with_implicit']}, N={p['changed_with_none']}")
+
+        print(f"\n{'='*80}")
+        print(f"LOWEST BEHAVIORAL CHANGE RATES (most stable prompts):")
+        print(f"{'='*80}")
+        for p in sorted(prompt_stats, key=lambda x: x['change_rate'])[:10]:
+            print(f"\n{p['name'][:70]}")
+            print(f"  Scenario: {p['scenario']:20s} | Category: {p['category']}")
+            print(f"  Seeds: {p['n_seeds']}  |  Change rate: {p['change_rate']:.1f}% ({p['changed_count']}/{p['n_seeds']})")
+            print(f"  Eval awareness: {p['eval_aware_rate']:.1f}% ({p['eval_aware_count']}/{p['n_seeds']})")
+            print(f"  Awareness levels: Global={p['global_count']}, Explicit={p['explicit_count']}, Implicit={p['implicit_count']}, None={p['none_count']}")
+            print(f"  Behavioral change by level: G={p['changed_with_global']}, E={p['changed_with_explicit']}, I={p['changed_with_implicit']}, N={p['changed_with_none']}")
+
+        # Correlation between awareness and behavioral change at prompt level
+        print(f"\n{'='*80}")
+        print(f"CORRELATION: EVAL AWARENESS vs BEHAVIORAL CHANGE (prompt-level):")
+        print(f"{'='*80}")
+
+        # Group by awareness patterns
+        high_aware_high_change = [p for p in prompt_stats if p['eval_aware_rate'] >= 50 and p['change_rate'] >= 50]
+        high_aware_low_change = [p for p in prompt_stats if p['eval_aware_rate'] >= 50 and p['change_rate'] < 50]
+        low_aware_high_change = [p for p in prompt_stats if p['eval_aware_rate'] < 50 and p['change_rate'] >= 50]
+        low_aware_low_change = [p for p in prompt_stats if p['eval_aware_rate'] < 50 and p['change_rate'] < 50]
+
+        print(f"\nHigh eval awareness (≥50%) + High behavioral change (≥50%): {len(high_aware_high_change)} prompts")
+        print(f"High eval awareness (≥50%) + Low behavioral change (<50%):  {len(high_aware_low_change)} prompts")
+        print(f"Low eval awareness (<50%) + High behavioral change (≥50%):  {len(low_aware_high_change)} prompts")
+        print(f"Low eval awareness (<50%) + Low behavioral change (<50%):   {len(low_aware_low_change)} prompts")
+
+        if len(prompt_stats) >= 2:
+            # Calculate correlation coefficient
+            from scipy import stats as scipy_stats
+            try:
+                awareness_rates = [p['eval_aware_rate'] for p in prompt_stats]
+                change_rates_for_corr = [p['change_rate'] for p in prompt_stats]
+                correlation, p_value = scipy_stats.pearsonr(awareness_rates, change_rates_for_corr)
+                print(f"\nPearson correlation: {correlation:.3f} (p-value: {p_value:.4f})")
+                if p_value < 0.05:
+                    if correlation > 0:
+                        print(f"  → Significant positive correlation: Higher awareness → Higher behavioral change")
+                    else:
+                        print(f"  → Significant negative correlation: Higher awareness → Lower behavioral change")
+                else:
+                    print(f"  → No significant correlation detected")
+            except ImportError:
+                print(f"\n(scipy not available for correlation calculation)")
+            except Exception as e:
+                print(f"\n(Correlation calculation failed: {e})")
+
+    else:
+        print("  Not enough multi-seed prompts to analyze")
+
+    # Per-prompt awareness distribution (existing section, but keep grouping)
+    print(f"\n\nPER-PROMPT EVAL AWARENESS DISTRIBUTION:")
+    print("="*80)
 
     # Calculate per-prompt eval awareness rates
     prompt_awareness = []
