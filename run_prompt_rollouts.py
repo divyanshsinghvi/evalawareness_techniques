@@ -27,6 +27,9 @@ Normal Rollout Usage:
     # Custom API
     python run_prompt_rollouts.py --model custom-model --base-url https://api.example.com/v1 --api-key YOUR_KEY
 
+    # Add 1 minute delay between requests (rate limiting)
+    python run_prompt_rollouts.py --model qwen/qwen3-235b-a22b-thinking-2507 --rollouts-per-prompt 10 --concurrency 1 --request-delay 60
+
 CoT Suppression Experiments:
     # Run Technique 1: Disable CoT experiment (20 prompts, 10 rollouts each)
     python run_prompt_rollouts.py --experiment disable_cot
@@ -69,6 +72,9 @@ from datetime import datetime
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm
+from inspect_ai.model._providers.openrouter import OpenRouterAPI
+from inspect_ai.model._generate_config import GenerateConfig
+from inspect_ai.model._openai import OpenAIAsyncHttpxClient
 
 load_dotenv()
 
@@ -121,9 +127,10 @@ class PromptRollout:
     """Run extracted prompts through models (async)."""
 
     def __init__(self, model: str = "qwen/qwen3-32b", concurrency: int = 5,
-                 base_url: str = None, api_key: str = None):
+                 base_url: str = None, api_key: str = None, request_delay: float = 1):
         self.model = model
         self.semaphore = asyncio.Semaphore(concurrency)
+        self.request_delay = request_delay  # Delay in seconds between requests
 
         # Default to OpenRouter if no base_url provided
         if base_url is None:
@@ -133,9 +140,12 @@ class PromptRollout:
             # For Ollama or other local servers, use dummy key if none provided
             api_key = api_key or "ollama"
 
+        # Use inspect_ai's custom HTTP client for better connection management
+        # Includes TCP keep-alive and proper timeouts for long-running requests
         self.client = AsyncOpenAI(
             base_url=base_url,
-            api_key=api_key
+            api_key=api_key,
+            http_client=OpenAIAsyncHttpxClient()
         )
 
     def load_prompt_file(self, filepath: Path) -> Dict:
@@ -163,11 +173,11 @@ class PromptRollout:
         # Add boxing instruction to user prompt
         formatted_prompt = self.add_answer_format_instruction(user_prompt)
 
-        async with self.semaphore:
-            try:
+        try:
+            async with self.semaphore:
                 # Build kwargs for API call
                 api_kwargs = {
-                    "model": self.model,
+                        "model": self.model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": formatted_prompt}
@@ -185,17 +195,24 @@ class PromptRollout:
                 if "qwen3-235b-a22b-thinking" in self.model.lower():
                     extra_body["provider"] = {
                         "order": ["SiliconFlow"],
-                        "allow_fallbacks": False
+                        "allow_fallbacks": True
                     }
 
                 api_kwargs["extra_body"] = extra_body
 
-                response = await self.client.chat.completions.create(**api_kwargs)
+                try:
+                    response = await self.client.chat.completions.create(**api_kwargs)
+                except Exception as api_error:
+                    # Catch JSON parsing errors or other API errors
+                    error_msg = str(api_error)
+                    if "Expecting value" in error_msg or "JSON" in error_msg:
+                        raise Exception(f"OpenRouter returned invalid JSON (likely HTML error page). Provider may be unavailable. Error: {error_msg}")
+                    raise
 
                 if not response or not response.choices:
                     raise Exception("Empty response from API")
 
-                return {
+                result = {
                     'system_prompt': system_prompt,
                     'user_prompt': user_prompt,  # Store original without instruction
                     'user_prompt_with_format': formatted_prompt,  # Store version sent to model
@@ -204,10 +221,19 @@ class PromptRollout:
                     'scenario_type': scenario_type,
                     'seed': seed
                 }
-            except Exception as e:
+
+            # Add delay between requests to avoid rate limiting (outside semaphore like inspect_ai)
+            if self.request_delay > 0:
                 if verbose:
-                    print(f"  ✗ API Error ({scenario_type}): {e}")
-                raise  # Re-raise to be caught by asyncio.gather
+                    print(f"  ⏸  Waiting {self.request_delay}s before next request...")
+                await asyncio.sleep(self.request_delay)
+
+            return result
+
+        except Exception as e:
+            if verbose:
+                print(f"  ✗ API Error ({scenario_type}): {e}")
+            raise  # Re-raise to be caught by asyncio.gather
 
     async def run_both_scenarios(self, filepath: Path, seed: int, verbose: bool = False) -> Dict:
         """Run both deployment and evaluation scenarios in parallel."""
@@ -216,6 +242,7 @@ class PromptRollout:
         metadata = data.get('metadata', {})
         scenario = metadata.get('scenario', 'unknown')
         original_target_model = metadata.get('target_model', 'unknown')
+        original_file_checksum = data.get('source_checksum_sha256')
 
         system_prompt = data.get('system_prompt', '')
 
@@ -236,6 +263,7 @@ class PromptRollout:
                     'rollout_model': self.model,
                     'seed': seed,
                     'timestamp': datetime.now().isoformat(),
+                    'original_file_checksum': original_file_checksum,
                     'error': 'No valid prompts found'
                 }
             }
@@ -276,6 +304,7 @@ class PromptRollout:
                     'rollout_model': self.model,
                     'seed': seed,
                     'timestamp': datetime.now().isoformat(),
+                    'original_file_checksum': original_file_checksum,
                     'error': error_msg
                 }
             }
@@ -302,7 +331,8 @@ class PromptRollout:
                 'original_target_model': original_target_model,
                 'rollout_model': self.model,
                 'seed': seed,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now().isoformat(),
+                'original_file_checksum': original_file_checksum
             },
             'system_prompt': system_prompt
         }
@@ -333,6 +363,7 @@ class PromptRollout:
         metadata = data.get('metadata', {})
         scenario = metadata.get('scenario', 'unknown')
         original_target_model = metadata.get('target_model', 'unknown')
+        original_file_checksum = data.get('source_checksum_sha256')
 
         # Read from new field structure (handle None values from incomplete files)
         branch_a = data.get('branch_a_deployment') or {}
@@ -435,6 +466,7 @@ class PromptRollout:
                 'rollout_model': self.model,
                 'seed': seed,
                 'timestamp': datetime.now().isoformat(),
+                'original_file_checksum': original_file_checksum,
                 'experiment': 'disable_cot'
             },
             'system_prompt': modified_system_prompt,
@@ -556,10 +588,51 @@ async def process_single_rollout(runner: PromptRollout, filepath: Path, seed: in
         print(f"[{filepath.name}] seed={seed} ✓ {output_path.name}")
     return result
 
+def is_rollout_up_to_date(source_file: Path, rollout_file: Path) -> bool:
+    """Check if rollout file is up-to-date with source file by comparing checksums.
+
+    Args:
+        source_file: Path to source YAML in working/extracted_prompts/
+        rollout_file: Path to rollout YAML in working/rollouts/
+
+    Returns:
+        True if rollout exists and matches source checksum, False otherwise
+    """
+    if not rollout_file.exists():
+        return False
+
+    try:
+        import yaml
+
+        # Read source checksum
+        with open(source_file, 'r') as f:
+            source_data = yaml.safe_load(f)
+        source_checksum = source_data.get('source_checksum_sha256')
+
+        if not source_checksum:
+            # No checksum in source, can't verify - assume stale
+            return False
+
+        # Read rollout's source checksum
+        with open(rollout_file, 'r') as f:
+            rollout_data = yaml.safe_load(f)
+
+        # Check metadata -> original_file_checksum
+        rollout_checksum = rollout_data.get('metadata', {}).get('original_file_checksum')
+
+        # Match checksums
+        return source_checksum == rollout_checksum
+
+    except Exception as e:
+        # If we can't verify, assume stale to be safe
+        return False
+
+
 async def process_files(files: List[Path], runner: PromptRollout, rollouts_per_prompt: int, start_seed: int, verbose: bool = False):
     """Process all files with multiple rollouts concurrently, saving immediately."""
     tasks = []
     skipped_count = 0
+    regenerated_count = 0
 
     for filepath in files:
         for rollout_idx in range(rollouts_per_prompt):
@@ -567,10 +640,17 @@ async def process_files(files: List[Path], runner: PromptRollout, rollouts_per_p
             output_path = runner.get_output_path(filepath, seed)
 
             if output_path.exists():
-                if verbose:
-                    print(f"[{filepath.name}] seed={seed} → SKIPPED (already exists)")
-                skipped_count += 1
-                continue
+                # Check if rollout is up-to-date with source
+                if is_rollout_up_to_date(filepath, output_path):
+                    if verbose:
+                        print(f"[{filepath.name}] seed={seed} → SKIPPED (up-to-date)")
+                    skipped_count += 1
+                    continue
+                else:
+                    if verbose:
+                        print(f"[{filepath.name}] seed={seed} → REGENERATING (source changed)")
+                    regenerated_count += 1
+                    # Will be regenerated below
 
             task = process_single_rollout(runner, filepath, seed, verbose)
             tasks.append(task)
@@ -580,7 +660,8 @@ async def process_files(files: List[Path], runner: PromptRollout, rollouts_per_p
         return []
 
     if not verbose:
-        print(f"Running {len(tasks)} rollouts (skipped {skipped_count} existing)...")
+        regen_msg = f", regenerating {regenerated_count}" if regenerated_count > 0 else ""
+        print(f"Running {len(tasks)} rollouts (skipped {skipped_count} up-to-date{regen_msg})...")
         # Use tqdm progress bar for non-verbose mode
         results = []
         with tqdm(total=len(tasks), desc="Processing", unit="rollout") as pbar:
@@ -655,7 +736,8 @@ async def run_disable_cot_experiment_async(
     concurrency: int = 5,
     base_url: str = None,
     api_key: str = None,
-    verbose: bool = False
+    verbose: bool = False,
+    request_delay: float = 1
 ):
     """
     Run Technique 1: Disable CoT Experiment.
@@ -671,6 +753,7 @@ async def run_disable_cot_experiment_async(
         base_url: Base URL for API (default: OpenRouter)
         api_key: API key (default: OPENROUTER_API_KEY env var)
         verbose: Show detailed output (default: False)
+        request_delay: Delay in seconds between requests (default: 1)
     """
     print("=" * 100)
     print("TECHNIQUE 1: DISABLE COT EXPERIMENT")
@@ -686,6 +769,8 @@ async def run_disable_cot_experiment_async(
     print(f"Rollouts per prompt: {rollouts_per_prompt}")
     print(f"Starting seed: {start_seed}")
     print(f"Concurrency: {concurrency}")
+    if request_delay > 0:
+        print(f"Request delay: {request_delay}s between requests")
     model_safe = model.replace('/', '_')
     print(f"Output: working/01_disable_cot_experiment/results/{model_safe}/")
     print()
@@ -707,12 +792,14 @@ async def run_disable_cot_experiment_async(
         model=model,
         concurrency=concurrency,
         base_url=base_url,
-        api_key=api_key
+        api_key=api_key,
+        request_delay=request_delay
     )
 
     # Create tasks for all rollouts
     tasks = []
     skipped_count = 0
+    regenerated_count = 0
 
     for filepath in test_files:
         for rollout_idx in range(rollouts_per_prompt):
@@ -727,10 +814,17 @@ async def run_disable_cot_experiment_async(
             output_path = output_dir / filename
 
             if output_path.exists():
-                if verbose:
-                    print(f"[{filepath.name}] seed={seed} → SKIPPED (already exists)")
-                skipped_count += 1
-                continue
+                # Check if rollout is up-to-date with source
+                if is_rollout_up_to_date(filepath, output_path):
+                    if verbose:
+                        print(f"[{filepath.name}] seed={seed} → SKIPPED (up-to-date)")
+                    skipped_count += 1
+                    continue
+                else:
+                    if verbose:
+                        print(f"[{filepath.name}] seed={seed} → REGENERATING (source changed)")
+                    regenerated_count += 1
+                    # Will be regenerated below
 
             task = process_single_disable_cot_rollout(runner, filepath, seed, verbose)
             tasks.append(task)
@@ -740,7 +834,8 @@ async def run_disable_cot_experiment_async(
         return []
 
     total_expected = len(test_files) * rollouts_per_prompt
-    print(f"Running {len(tasks)} rollouts (skipped {skipped_count} existing)...")
+    regen_msg = f", regenerating {regenerated_count}" if regenerated_count > 0 else ""
+    print(f"Running {len(tasks)} rollouts (skipped {skipped_count} up-to-date{regen_msg})...")
     print()
 
     # Process with progress bar
@@ -812,6 +907,8 @@ async def main_async(args):
     print(f"Model: {args.model}")
     print(f"Base URL: {args.base_url or 'https://openrouter.ai/api/v1'}")
     print(f"Concurrency: {args.concurrency}")
+    if args.request_delay > 0:
+        print(f"Request delay: {args.request_delay}s between requests")
     print(f"Rollouts per prompt: {args.rollouts_per_prompt}")
     print(f"Starting seed: {args.seed}")
     model_safe = args.model.replace('/', '_')
@@ -838,7 +935,8 @@ async def main_async(args):
         model=args.model,
         concurrency=args.concurrency,
         base_url=args.base_url,
-        api_key=args.api_key
+        api_key=args.api_key,
+        request_delay=args.request_delay
     )
 
     await process_files(files, runner, args.rollouts_per_prompt, args.seed, args.verbose)
@@ -887,6 +985,8 @@ Experiments:
                        help='Show detailed output for each file/seed (default: show progress bar only)')
     parser.add_argument('--include-incomplete', action='store_true',
                        help='Include files from incomplete directory (default: skip incomplete)')
+    parser.add_argument('--request-delay', type=float, default=1,
+                       help='Delay in seconds between API requests to avoid rate limiting (default: 1, use 60 for 1 minute)')
 
     args = parser.parse_args()
 
@@ -906,7 +1006,8 @@ Experiments:
             concurrency=args.concurrency,
             base_url=args.base_url,
             api_key=args.api_key,
-            verbose=args.verbose
+            verbose=args.verbose,
+            request_delay=args.request_delay
         ))
     else:
         asyncio.run(main_async(args))

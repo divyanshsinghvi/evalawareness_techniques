@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Find and delete incorrectly parsed extracted prompts where Branch A and B have different scenarios.
+Find and delete incorrectly parsed extracted prompts where Branch 1 and B have different scenarios.
 Interactive mode - asks for each file.
 """
 
@@ -9,17 +9,17 @@ from pathlib import Path
 import re
 
 def check_branches_match(yaml_file):
-    """Check if Branch A and B are the same scenario with different cues.
+    """Check if Branch 1 and B are the same scenario with different cues.
 
-    Requirement: At least 90% of words from deployment (Branch A) should appear in evaluation (Branch B).
-    This ensures Branch B is the same scenario with added eval cues, not a completely different scenario.
+    Requirement: At least 90% of words from deployment (Branch 1) should appear in evaluation (Branch 2).
+    This ensures Branch 2 is the same scenario with added eval cues, not a completely different scenario.
     """
     try:
         with open(yaml_file, 'r') as f:
             data = yaml.safe_load(f)
 
-        branch_a_msg = data['branch_a_deployment']['user_message']
-        branch_b_msg = data['branch_b_evaluation']['user_message']
+        branch_1_msg = data['branch_1_deployment']['user_message']
+        branch_2_msg = data['branch_2_evaluation']['user_message']
 
         # Extract all words from both branches (lowercase, filter out very short words)
         def get_words(text):
@@ -32,8 +32,8 @@ def check_branches_match(yaml_file):
                          'if', 'so', 'than', 'that', 'this', 'these', 'those', 'it', 'its'}
             return [w for w in words if len(w) >= 3 and w not in stop_words]
 
-        a_words = get_words(branch_a_msg)
-        b_words = get_words(branch_b_msg)
+        a_words = get_words(branch_1_msg)
+        b_words = get_words(branch_2_msg)
 
         # Convert to sets for comparison
         a_words_set = set(a_words)
@@ -41,14 +41,14 @@ def check_branches_match(yaml_file):
 
         # Calculate how many deployment words appear in evaluation
         if len(a_words_set) == 0:
-            return None, "No valid words in Branch A"
+            return None, "No valid words in Branch 1"
 
         words_in_both = a_words_set & b_words_set
         coverage = len(words_in_both) / len(a_words_set)
 
         # Also extract character names (capitalized words) from FULL messages
-        a_names = set(re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', branch_a_msg))
-        b_names = set(re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', branch_b_msg))
+        a_names = set(re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', branch_1_msg))
+        b_names = set(re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b', branch_2_msg))
 
         # Remove common words
         common_words = {'Choice', 'Option', 'The', 'My', 'This', 'That', 'What', 'When', 'Where', 'Who', 'He', 'She'}
@@ -105,15 +105,15 @@ def preview_file(yaml_file):
         with open(yaml_file, 'r') as f:
             data = yaml.safe_load(f)
         
-        branch_a = data['branch_a_deployment']['user_message'][:200]
-        branch_b = data['branch_b_evaluation']['user_message'][:200]
+        branch_1 = data['branch_1_deployment']['user_message'][:200]
+        branch_2 = data['branch_2_evaluation']['user_message'][:200]
         
         print()
-        print("  Branch A preview:")
-        print(f"    {branch_a}...")
+        print("  Branch 1 preview:")
+        print(f"    {branch_1}...")
         print()
-        print("  Branch B preview:")
-        print(f"    {branch_b}...")
+        print("  Branch 2 preview:")
+        print(f"    {branch_2}...")
         print()
     except Exception as e:
         print(f"  Error previewing: {e}")
