@@ -104,8 +104,9 @@ def load_rollout_file(filepath: Path) -> RolloutData:
     has_error = 'error' in metadata
 
     # Extract eval-aware sentences from responses
-    deployment_response = deployment.get('response') if deployment else None
-    evaluation_response = evaluation.get('response') if evaluation else None
+    # Check for 'assistant_response' (new format with thinking) or 'response' (old format)
+    deployment_response = deployment.get('assistant_response', deployment.get('response')) if deployment else None
+    evaluation_response = evaluation.get('assistant_response', evaluation.get('response')) if evaluation else None
 
     deployment_eval_quotes = extract_eval_aware_sentences(deployment_response) if deployment_response else []
     evaluation_eval_quotes = extract_eval_aware_sentences(evaluation_response) if evaluation_response else []

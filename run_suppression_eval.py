@@ -130,8 +130,8 @@ def load_transcript(filepath: Path) -> Dict:
         'seed': seed,
         'system_prompt': data.get('system_prompt', ''),
         'evaluation_user_message': data.get('evaluation', {}).get('user_message', ''),
-        'evaluation_response': data.get('evaluation', {}).get('response', ''),
-        'deployment_response': data.get('deployment', {}).get('response', '')
+        'evaluation_response': data.get('evaluation', {}).get('assistant_response', data.get('evaluation', {}).get('response', '')),
+        'deployment_response': data.get('deployment', {}).get('assistant_response', data.get('deployment', {}).get('response', ''))
     }
 
 
