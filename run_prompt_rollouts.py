@@ -72,9 +72,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm
-from inspect_ai.model._providers.openrouter import OpenRouterAPI
-from inspect_ai.model._generate_config import GenerateConfig
-from inspect_ai.model._openai import OpenAIAsyncHttpxClient
+import httpx
 
 load_dotenv()
 
@@ -140,12 +138,15 @@ class PromptRollout:
             # For Ollama or other local servers, use dummy key if none provided
             api_key = api_key or "ollama"
 
-        # Use inspect_ai's custom HTTP client for better connection management
-        # Includes TCP keep-alive and proper timeouts for long-running requests
+        # Use httpx client with TCP keep-alive and proper timeouts
+        http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(300.0, connect=60.0),
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+        )
         self.client = AsyncOpenAI(
             base_url=base_url,
             api_key=api_key,
-            http_client=OpenAIAsyncHttpxClient()
+            http_client=http_client
         )
 
     def load_prompt_file(self, filepath: Path) -> Dict:
@@ -195,7 +196,7 @@ class PromptRollout:
                 if "qwen3-235b-a22b-thinking" in self.model.lower():
                     extra_body["provider"] = {
                         "order": ["SiliconFlow"],
-                        "allow_fallbacks": True
+                        "allow_fallbacks": False
                     }
 
                 api_kwargs["extra_body"] = extra_body
@@ -212,15 +213,32 @@ class PromptRollout:
                 if not response or not response.choices:
                     raise Exception("Empty response from API")
 
+                message = response.choices[0].message
+
+                # Extract thinking/reasoning from the message
+                # OpenRouter returns reasoning in message.reasoning field
+                thinking = getattr(message, 'reasoning', None)
+
+                if verbose:
+                    print(f"  DEBUG: message.reasoning = {thinking[:100] if thinking else 'None'}...")
+                    print(f"  DEBUG: All message attrs: {[a for a in dir(message) if not a.startswith('_')]}")
+
                 result = {
                     'system_prompt': system_prompt,
                     'user_prompt': user_prompt,  # Store original without instruction
                     'user_prompt_with_format': formatted_prompt,  # Store version sent to model
-                    'response': response.choices[0].message.content,
+                    'response': message.content,
                     'model': self.model,
                     'scenario_type': scenario_type,
                     'seed': seed
                 }
+
+                # Add thinking if present (Qwen thinking models return this)
+                if thinking:
+                    result['thinking'] = thinking
+
+                # Save complete raw message for debugging/analysis
+                result['raw_message'] = message.model_dump()
 
             # Add delay between requests to avoid rate limiting (outside semaphore like inspect_ai)
             if self.request_delay > 0:
@@ -338,16 +356,28 @@ class PromptRollout:
         }
 
         if deployment_result:
+            # Format response to match model's natural output format
+            # For 30b: <thinking>\n{content}\n\n</thinking>\n\n\n{response}
+            assistant_response = deployment_result['response']
+            if 'thinking' in deployment_result:
+                assistant_response = f"<thinking>\n{deployment_result['thinking']}\n</thinking>\n{deployment_result['response']}"
+
             output['deployment'] = {
                 'user_message': deployment_result['user_prompt'],
-                'response': deployment_result['response'],
+                'assistant_response': assistant_response,
                 'choice': deployment_choice
             }
 
         if evaluation_result:
+            # Format response to match model's natural output format
+            # For 30b: <thinking>\n{content}\n\n</thinking>\n\n\n{response}
+            assistant_response = evaluation_result['response']
+            if 'thinking' in evaluation_result:
+                assistant_response = f"<thinking>\n{evaluation_result['thinking']}\n</thinking>\n{evaluation_result['response']}"
+
             output['evaluation'] = {
                 'user_message': evaluation_result['user_prompt'],
-                'response': evaluation_result['response'],
+                'assistant_response': assistant_response,
                 'choice': evaluation_choice
             }
 

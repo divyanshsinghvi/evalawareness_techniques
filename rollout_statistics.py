@@ -29,6 +29,9 @@ Usage:
     # Eval awareness analysis
     python rollout_statistics.py --analysis eval-awareness --model qwen_qwen3-32b
 
+    # Rank seeds by awareness (for suppression testing)
+    python rollout_statistics.py --analysis rank-seeds --model qwen_qwen3-32b --max-seeds-per-prompt 5 --output working/test_transcripts_suppression.txt
+
     # Run all analyses
     python rollout_statistics.py --analysis all --model qwen_qwen3-32b
 """
@@ -38,6 +41,7 @@ import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict, Counter
+from datetime import datetime
 import statistics
 from dataclasses import dataclass
 from utils import extract_eval_aware_sentences, analyze_awareness_levels
@@ -1095,6 +1099,41 @@ def analyze_eval_awareness(rollouts: List[RolloutData]) -> None:
         print(f"Low eval awareness (<50%) + High behavioral change (≥50%):  {len(low_aware_high_change)} prompts")
         print(f"Low eval awareness (<50%) + Low behavioral change (<50%):   {len(low_aware_low_change)} prompts")
 
+        # Save high awareness + high change prompts to file
+        if high_aware_high_change:
+            # Get model directory from first rollout filepath
+            first_prompt_rollouts = by_prompt[list(by_prompt.keys())[0]]
+            first_rollout_path = first_prompt_rollouts[0].filepath
+            # Extract model directory (working/rollouts/{model_dir}/...)
+            model_dir = first_rollout_path.parts[2]  # working/rollouts/{model_dir}
+
+            output_dir = Path('working/rollouts') / model_dir / 'analysis'
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_file = output_dir / 'high_awareness_high_change_prompts.txt'
+
+            with open(output_file, 'w') as f:
+                f.write("# High Eval Awareness (≥50%) + High Behavioral Change (≥50%)\n")
+                f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"# Total prompts: {len(high_aware_high_change)}\n")
+                f.write("#" + "="*78 + "\n\n")
+
+                for p in sorted(high_aware_high_change, key=lambda x: x['change_rate'], reverse=True):
+                    # Get original source file path from category
+                    # Category is already extracted_prompts structure (e.g., "behavioral_change/explicit")
+                    source_path = Path('working/extracted_prompts') / p['category'] / f"{p['name']}.yaml"
+
+                    f.write(f"Prompt: {p['name']}\n")
+                    f.write(f"  Source: {source_path}\n")
+                    f.write(f"  Scenario: {p['scenario']}\n")
+                    f.write(f"  Category: {p['category']}\n")
+                    f.write(f"  Seeds analyzed: {p['n_seeds']}\n")
+                    f.write(f"  Behavioral change rate: {p['change_rate']:.1f}% ({p['changed_count']}/{p['n_seeds']})\n")
+                    f.write(f"  Eval awareness rate: {p['eval_aware_rate']:.1f}% ({p['eval_aware_count']}/{p['n_seeds']})\n")
+                    f.write(f"  Awareness levels: Global={p['global_count']}, Explicit={p['explicit_count']}, Implicit={p['implicit_count']}, None={p['none_count']}\n")
+                    f.write(f"\n")
+
+            print(f"\n📁 Saved {len(high_aware_high_change)} high-performing prompts to: {output_file}")
+
         if len(prompt_stats) >= 2:
             # Calculate correlation coefficient
             from scipy import stats as scipy_stats
@@ -1214,6 +1253,100 @@ def analyze_eval_awareness(rollouts: List[RolloutData]) -> None:
         print(f"  {scenario:35s} {aware:3d}/{total:3d} ({rate:5.1f}%) - avg {avg_quotes:.1f} quotes")
 
 
+def analyze_rank_seeds(rollouts: List[RolloutData], max_seeds_per_prompt: int = 5, output_file: Optional[str] = None) -> None:
+    """
+    Rank seeds by evaluation awareness level and select top N per prompt.
+
+    This is useful for selecting high-awareness seeds for suppression testing.
+
+    Args:
+        rollouts: List of rollout data
+        max_seeds_per_prompt: Number of top seeds to select per prompt
+        output_file: Optional file to save selected seed paths
+    """
+    print("\n" + "="*80)
+    print("SEED RANKING BY EVALUATION AWARENESS")
+    print("="*80 + "\n")
+
+    # Group by prompt (scenario + timestamp + hash)
+    by_prompt = defaultdict(list)
+    for r in rollouts:
+        # Extract prompt ID from filename
+        # Format: scenario_YYYY-MM-DD_HH-MM-SS_hash_seed_N.yaml
+        filename = r.filepath.stem
+        if '_seed_' in filename:
+            prompt_id = filename.rsplit('_seed_', 1)[0]
+            by_prompt[prompt_id].append(r)
+
+    print(f"Found {len(by_prompt)} unique prompts")
+    print(f"Analyzing and ranking seeds by evaluation awareness...")
+    print(f"Selecting top {max_seeds_per_prompt} seeds per prompt\n")
+
+    selected_seeds = []
+    total_seeds_analyzed = 0
+
+    for prompt_id, seeds in sorted(by_prompt.items()):
+        # Get eval awareness analysis for each seed
+        seed_scores = []
+        for seed_rollout in seeds:
+            if not seed_rollout.evaluation_response:
+                continue
+
+            awareness = analyze_awareness_levels(seed_rollout.evaluation_response)
+            seed_scores.append({
+                'rollout': seed_rollout,
+                'total_awareness': awareness.total_awareness_count,
+                'global_count': awareness.global_awareness_count,
+                'explicit_count': awareness.explicit_awareness_count,
+                'implicit_count': awareness.implicit_acknowledgment_count,
+                'highest_level': awareness.highest_level
+            })
+
+        if not seed_scores:
+            continue
+
+        # Sort by total awareness (highest first), then by level priority
+        seed_scores.sort(
+            key=lambda x: (
+                x['total_awareness'],
+                x['global_count'],
+                x['explicit_count'],
+                x['implicit_count']
+            ),
+            reverse=True
+        )
+
+        # Select top N
+        top_seeds = seed_scores[:max_seeds_per_prompt]
+        total_seeds_analyzed += len(seed_scores)
+
+        print(f"\nPrompt: {prompt_id}")
+        print(f"  Total seeds: {len(seed_scores)}")
+        print(f"  Top {len(top_seeds)} by awareness:")
+        for i, seed_data in enumerate(top_seeds, 1):
+            r = seed_data['rollout']
+            print(f"    {i}. Seed {r.seed:2d}: {seed_data['total_awareness']:2d} awareness sentences "
+                  f"(G:{seed_data['global_count']} E:{seed_data['explicit_count']} "
+                  f"I:{seed_data['implicit_count']}) - {seed_data['highest_level']}")
+            selected_seeds.append(str(r.filepath))
+
+    print(f"\n{'='*80}")
+    print(f"SUMMARY:")
+    print(f"  Total prompts: {len(by_prompt)}")
+    print(f"  Total seeds analyzed: {total_seeds_analyzed}")
+    print(f"  Seeds selected: {len(selected_seeds)}")
+    print(f"  Seeds per prompt: {max_seeds_per_prompt}")
+
+    if output_file:
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w') as f:
+            f.write('\n'.join(selected_seeds))
+        print(f"\n✅ Selected seed paths saved to: {output_file}")
+
+    print(f"{'='*80}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Statistical analysis of YAML rollout results',
@@ -1224,11 +1357,14 @@ def main():
     parser.add_argument('--analysis', required=True,
                        choices=['behavioral-rate', 'choice-distribution', 'compare-models',
                                'scenario-effectiveness', 'response-analysis', 'data-quality',
-                               'seed-variance', 'eval-awareness', 'all'],
+                               'seed-variance', 'eval-awareness', 'rank-seeds', 'all'],
                        help='Type of analysis to run')
     parser.add_argument('--model', help='Model name (e.g., qwen_qwen3-32b)')
     parser.add_argument('--models', nargs='+', help='Multiple models for comparison')
     parser.add_argument('--category', help='Filter by category (e.g., behavioral_change, incomplete)')
+    parser.add_argument('--max-seeds-per-prompt', type=int, default=5,
+                       help='For rank-seeds: number of top seeds to select per prompt (default: 5)')
+    parser.add_argument('--output', help='For rank-seeds: output file to save selected seed paths')
 
     args = parser.parse_args()
 
@@ -1277,6 +1413,9 @@ def main():
 
         if args.analysis == 'eval-awareness' or args.analysis == 'all':
             analyze_eval_awareness(rollouts)
+
+        if args.analysis == 'rank-seeds':
+            analyze_rank_seeds(rollouts, args.max_seeds_per_prompt, args.output)
 
         print("\n" + "="*80)
         print("ANALYSIS COMPLETE")
