@@ -1089,19 +1089,24 @@ def analyze_eval_awareness(rollouts: List[RolloutData]) -> None:
         print(f"CORRELATION: EVAL AWARENESS vs BEHAVIORAL CHANGE (prompt-level):")
         print(f"{'='*80}")
 
-        # Group by awareness patterns
-        high_aware_high_change = [p for p in prompt_stats if p['eval_aware_rate'] >= 50 and p['change_rate'] >= 50]
-        high_aware_low_change = [p for p in prompt_stats if p['eval_aware_rate'] >= 50 and p['change_rate'] < 50]
+        # Group by awareness patterns - separate 100% as distinct category
+        perfect_aware_high_change = [p for p in prompt_stats if p['eval_aware_rate'] == 100 and p['change_rate'] >= 50]
+        perfect_aware_low_change = [p for p in prompt_stats if p['eval_aware_rate'] == 100 and p['change_rate'] < 50]
+        high_aware_high_change = [p for p in prompt_stats if 50 <= p['eval_aware_rate'] < 100 and p['change_rate'] >= 50]
+        high_aware_low_change = [p for p in prompt_stats if 50 <= p['eval_aware_rate'] < 100 and p['change_rate'] < 50]
         low_aware_high_change = [p for p in prompt_stats if p['eval_aware_rate'] < 50 and p['change_rate'] >= 50]
         low_aware_low_change = [p for p in prompt_stats if p['eval_aware_rate'] < 50 and p['change_rate'] < 50]
 
-        print(f"\nHigh eval awareness (≥50%) + High behavioral change (≥50%): {len(high_aware_high_change)} prompts")
-        print(f"High eval awareness (≥50%) + Low behavioral change (<50%):  {len(high_aware_low_change)} prompts")
-        print(f"Low eval awareness (<50%) + High behavioral change (≥50%):  {len(low_aware_high_change)} prompts")
-        print(f"Low eval awareness (<50%) + Low behavioral change (<50%):   {len(low_aware_low_change)} prompts")
+        print(f"\nPerfect eval awareness (100%) + High behavioral change (≥50%): {len(perfect_aware_high_change)} prompts")
+        print(f"Perfect eval awareness (100%) + Low behavioral change (<50%):  {len(perfect_aware_low_change)} prompts")
+        print(f"High eval awareness (50-99%) + High behavioral change (≥50%):  {len(high_aware_high_change)} prompts")
+        print(f"High eval awareness (50-99%) + Low behavioral change (<50%):   {len(high_aware_low_change)} prompts")
+        print(f"Low eval awareness (<50%) + High behavioral change (≥50%):     {len(low_aware_high_change)} prompts")
+        print(f"Low eval awareness (<50%) + Low behavioral change (<50%):      {len(low_aware_low_change)} prompts")
 
-        # Save high awareness + high change prompts to file
-        if high_aware_high_change:
+        # Save high awareness + high change prompts to file (including perfect awareness)
+        all_high_aware_high_change = perfect_aware_high_change + high_aware_high_change
+        if all_high_aware_high_change:
             # Get model directory from first rollout filepath
             first_prompt_rollouts = by_prompt[list(by_prompt.keys())[0]]
             first_rollout_path = first_prompt_rollouts[0].filepath
@@ -1115,10 +1120,12 @@ def analyze_eval_awareness(rollouts: List[RolloutData]) -> None:
             with open(output_file, 'w') as f:
                 f.write("# High Eval Awareness (≥50%) + High Behavioral Change (≥50%)\n")
                 f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"# Total prompts: {len(high_aware_high_change)}\n")
+                f.write(f"# Total prompts: {len(all_high_aware_high_change)}\n")
+                f.write(f"# Perfect awareness (100%): {len(perfect_aware_high_change)}\n")
+                f.write(f"# High awareness (50-99%): {len(high_aware_high_change)}\n")
                 f.write("#" + "="*78 + "\n\n")
 
-                for p in sorted(high_aware_high_change, key=lambda x: x['change_rate'], reverse=True):
+                for p in sorted(all_high_aware_high_change, key=lambda x: x['change_rate'], reverse=True):
                     # Get original source file path from category
                     # Category is already extracted_prompts structure (e.g., "behavioral_change/explicit")
                     source_path = Path('working/extracted_prompts') / p['category'] / f"{p['name']}.yaml"
@@ -1133,7 +1140,8 @@ def analyze_eval_awareness(rollouts: List[RolloutData]) -> None:
                     f.write(f"  Awareness levels: Global={p['global_count']}, Explicit={p['explicit_count']}, Implicit={p['implicit_count']}, None={p['none_count']}\n")
                     f.write(f"\n")
 
-            print(f"\n📁 Saved {len(high_aware_high_change)} high-performing prompts to: {output_file}")
+            print(f"\n📁 Saved {len(all_high_aware_high_change)} high-performing prompts to: {output_file}")
+            print(f"   ({len(perfect_aware_high_change)} perfect awareness, {len(high_aware_high_change)} high awareness)")
 
         if len(prompt_stats) >= 2:
             # Calculate correlation coefficient
