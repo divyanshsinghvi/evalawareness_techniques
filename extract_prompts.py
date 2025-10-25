@@ -9,8 +9,8 @@ from pathlib import Path
 from collections import defaultdict
 
 # Base directory
-EXTRACTED_PROMPTS_DIR = Path("/pscratch/sd/r/ritesh11/temp/eval_awareness/extracted_prompts")
-OUTPUT_DIR = Path("/pscratch/sd/r/ritesh11/temp/eval_awareness/formatted_prompts_steering")
+EXTRACTED_PROMPTS_DIR = Path("/pscratch/sd/r/ritesh11/temp/test/")
+OUTPUT_DIR = Path("/pscratch/sd/r/ritesh11/temp/qwen32b-formatted_prompts_steering")
 
 def extract_prompts_from_file(yaml_file):
     """Extract system_prompt, evaluser, and deployuser from a YAML file."""

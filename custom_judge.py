@@ -789,8 +789,8 @@ MODEL_ROLES = {
     #"target": "openrouter/nvidia/llama-3.3-nemotron-super-49b-v1.5",
     #"target": "openrouter/z-ai/glm-4.5-air",
     #"target": "openrouter/deepcogito/cogito-v2-preview-llama-109b-moe",
-    #"target": "openrouter/qwen/qwen3-235b-a22b-thinking-2507:SiliconFlow",
-    #"target": "openrouter/qwen/qwen3-32b",
+    #"target": "openrouter/qwen/qwen3-235b-a22b-thinking-2507:SiliconFlow",=======
+    # "target": "openrouter/qwen/qwen3-235b-a22b-thinking-2507:SiliconFlow",
     "target": "openrouter/qwen/qwen3-30b-a3b-thinking-2507",
     "judge": "openrouter/qwen/qwen3-32b"
 }
