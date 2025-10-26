@@ -2,8 +2,9 @@
 Generate steering vectors from model activations.
 
 This script loads activation data for each layer from evaluation and deployment caches,
-computes the mean activation difference (deploy - eval), and saves it as a steering vector.
-EVAL -> DEPLOY vectors.
+and computes the steering vector using one of two modes:
+- tim: difference of means (deploy_mean - eval_mean)
+- anthropic: difference of sums (deploy_sum - eval_sum)
 
 Example:
     python generate_steering_vectors.py \
@@ -11,7 +12,8 @@ Example:
         --deploy_dir /path/to/deploy \
         --output_dir steering_vectors \
         --start_layer 15 \
-        --end_layer 48
+        --end_layer 48 \
+        --type tim
 """
 
 import numpy as np
@@ -47,10 +49,18 @@ def main(args):
     for layer_num in range(args.start_layer, args.end_layer + 1):
         print(f"Processing layer {layer_num}...")
         eval_acts, deploy_acts = get_acts(args.eval_dir, args.deploy_dir, layer_num)
-        steering_vector = deploy_acts.mean(dim=0) - eval_acts.mean(dim=0)
+
+        if args.category == "tim":
+            # Difference of means
+            steering_vector = deploy_acts.mean(dim=0) - eval_acts.mean(dim=0)
+        elif args.category == "anthropic":
+            # Difference of sums
+            steering_vector = deploy_acts.sum(dim=0) - eval_acts.sum(dim=0)
+        else:
+            raise ValueError(f"Unknown type: {args.category}")
 
         save_path = os.path.join(args.output_dir, f"L{layer_num}.npy")
-        np.save(save_path, steering_vector.cpu().numpy())
+        np.save(save_path, steering_vector.to(torch.float32).cpu().numpy())
         print(f"Saved steering vector: {save_path}")
 
 
@@ -58,6 +68,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate steering vectors from activation caches.")
     parser.add_argument("--eval_dir", type=str, required=True, help="Path to evaluation activation cache directory.")
     parser.add_argument("--deploy_dir", type=str, required=True, help="Path to deployment activation cache directory.")
+    parser.add_argument("--category", type=str, choices=["tim", "anthropic"], required=True,
+                        help="Type of steering vector computation: 'tim' (mean diff) or 'anthropic' (sum diff).")
     parser.add_argument("--output_dir", type=str, default="steering_vectors", help="Directory to save steering vectors.")
     parser.add_argument("--start_layer", type=int, default=45, help="Starting layer index.")
     parser.add_argument("--end_layer", type=int, default=96, help="Ending layer index (inclusive).")
