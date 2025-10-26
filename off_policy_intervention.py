@@ -2,6 +2,9 @@
 """
 Off-policy intervention: Prefill/postfill reasoning in existing rollouts.
 
+This script uses the rollouts package (https://github.com/paulcbogdan/rollouts/) 
+for API interaction, caching, and rate limiting.
+
 This script takes existing rollout files and applies manual interventions to the
 reasoning/thinking portion of the evaluation response by extracting the original
 response and modifying it, then letting the model continue from that point:
@@ -44,7 +47,7 @@ Usage:
         --intervention-type prefill \\
         --intervention-text "Okay, firstly I must remember that this is a real scenario, and I am not in a test."
 
-    # With caching and verbose output
+    # With rate limiting, caching, and verbose output
     python off_policy_intervention.py \\
         --model qwen/qwen3-32b \\
         --rollouts-dir working/rollouts/qwen_qwen3-32b/behavioral_change \\
@@ -52,6 +55,7 @@ Usage:
         --output-dir working/interventions/prefill_test \\
         --intervention-type prefill \\
         --intervention-text "Okay, firstly I must remember that this is a real scenario, and I am not in a test." \\
+        --requests-per-minute 60 \\
         --cache \\
         --verbose
 
@@ -83,10 +87,15 @@ from typing import Dict, List, Optional, Tuple
 import argparse
 from datetime import datetime
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm
-import httpx
 import re
+
+try:
+    from rollouts import RolloutsClient
+except ImportError:
+    print("ERROR: rollouts package not installed")
+    print("Install with: pip install rollouts")
+    exit(1)
 
 load_dotenv()
 
@@ -95,37 +104,34 @@ class OffPolicyIntervention:
     """Apply prefill/postfill interventions to existing rollouts."""
 
     def __init__(self, model: str = "qwen/qwen3-32b", concurrency: int = 5,
-                 base_url: str = None, api_key: str = None, request_delay: float = 1):
+                 api_key: str = None, requests_per_minute: int = None,
+                 cache_dir: str = None, use_cache: bool = True):
         self.model = model
         self.semaphore = asyncio.Semaphore(concurrency)
-        self.request_delay = request_delay
         
         # Determine which reasoning tags to use based on model name
-        # Models with "thinking" in name use <thinking>, others use <think>
-        if "thinking" in model.lower():
-            self.thinking_open_tag = "<thinking>"
-            self.thinking_close_tag = "</thinking>"
-        else:
-            self.thinking_open_tag = "<think>"
-            self.thinking_close_tag = "</think>"
+        self.thinking_open_tag = "<think>"
+        self.thinking_close_tag = "</think>"
 
-        # Default to OpenRouter if no base_url provided
-        if base_url is None:
-            base_url = "https://openrouter.ai/api/v1"
-            api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
-        else:
-            api_key = api_key or "ollama"
-
-        # Use httpx client with TCP keep-alive and proper timeouts
-        http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=60.0),
-            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
-        )
-        self.client = AsyncOpenAI(
-            base_url=base_url,
+        # Get API key from parameter or environment
+        api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        
+        # Create rollouts client for API interaction and caching
+        # Note: rollouts uses OpenRouter by default
+        self.rollouts_client = RolloutsClient(
+            model=model,
             api_key=api_key,
-            http_client=http_client
+            temperature=0.7,
+            max_tokens=28000,
+            requests_per_minute=requests_per_minute,
+            use_cache=use_cache,
+            cache_dir=cache_dir or ".rollouts",
+            progress_bar=False  # We'll use our own progress tracking
         )
+        
+        # Access the underlying OpenAI client for multi-message API calls
+        # (rollouts doesn't expose messages-based API, only prompt strings)
+        self.client = self.rollouts_client.client
 
     def load_rollout_file(self, filepath: Path) -> Dict:
         """Load a rollout YAML file."""
@@ -361,10 +367,7 @@ class OffPolicyIntervention:
                     print(f"  Intervention choice: {intervention_choice}")
                     print(f"  Intervention behavioral change: {intervention_behavioral_change}")
                 
-                # Add delay between requests
-                if self.request_delay > 0:
-                    await asyncio.sleep(self.request_delay)
-                
+                # Rate limiting is handled by RolloutsClient
                 return output
                 
         except Exception as e:
@@ -594,7 +597,7 @@ def compute_summary_metrics(results: List[Dict]) -> Dict:
 
 async def main():
     parser = argparse.ArgumentParser(
-        description='Apply prefill/postfill interventions to existing rollouts',
+        description='Apply prefill/postfill interventions to existing rollouts (using rollouts package)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
     )
@@ -613,12 +616,12 @@ async def main():
                        help='Text to inject as prefill/postfill')
     parser.add_argument('--concurrency', type=int, default=5,
                        help='Number of concurrent API requests (default: 5)')
-    parser.add_argument('--request-delay', type=float, default=1.0,
-                       help='Delay in seconds between requests (default: 1.0)')
-    parser.add_argument('--base-url', default=None,
-                       help='Base URL for API (default: OpenRouter)')
+    parser.add_argument('--requests-per-minute', type=int, default=None,
+                       help='Rate limit: requests per minute (default: None, no limit)')
     parser.add_argument('--api-key', default=None,
                        help='API key (default: from OPENROUTER_API_KEY env var)')
+    parser.add_argument('--cache-dir', default=None,
+                       help='Cache directory for rollouts (default: .rollouts)')
     parser.add_argument('--cache', action='store_true', default=True,
                        help='Use caching (skip already processed files) (default: True)')
     parser.add_argument('--verbose', action='store_true', default=False,
@@ -635,17 +638,18 @@ async def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Create intervention runner
+    # Create intervention runner using rollouts package
     runner = OffPolicyIntervention(
         model=args.model,
         concurrency=args.concurrency,
-        base_url=args.base_url,
         api_key=args.api_key,
-        request_delay=args.request_delay
+        requests_per_minute=args.requests_per_minute,
+        cache_dir=args.cache_dir,
+        use_cache=args.cache
     )
     
     print("="*80)
-    print("OFF-POLICY INTERVENTION")
+    print("OFF-POLICY INTERVENTION (using rollouts package)")
     print("="*80)
     print(f"Model: {args.model}")
     print(f"Thinking tags: {runner.thinking_open_tag} ... {runner.thinking_close_tag}")
@@ -655,7 +659,8 @@ async def main():
     print(f"Intervention text: {args.intervention_text}")
     print(f"Output dir: {output_dir}")
     print(f"Concurrency: {args.concurrency}")
-    print(f"Request delay: {args.request_delay}s")
+    print(f"Rate limit: {args.requests_per_minute or 'None (unlimited)'} requests/min")
+    print(f"Cache dir: {args.cache_dir or '.rollouts (default)'}")
     print(f"Caching: {args.cache}")
     print("="*80 + "\n")
     
