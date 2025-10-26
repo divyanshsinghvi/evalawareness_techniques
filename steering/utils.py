@@ -19,164 +19,155 @@ from dataclasses import dataclass
 import yaml
 import os
 
-def load_lists_from_yaml(input_dir: str, mode: str):
+
+
+def load_prompts_with_metadata(input_dir: str, mode: str, priority: str = "high-awareness"):
     """
-    Load YAML lists (common_sys and one user list) based on mode.
-
+    Load YAML prompts with metadata (source file, checksum, priority).
+    Ensures system prompts and user prompts are properly paired by checksum.
+    
+    Input directory structure (new format):
+        input_dir/                          <- e.g., steer_formatted_prompts/model_name
+            high-awareness/
+                system_prompts.yaml  <- List of {source_file, checksum, priority, prompt}
+                eval_user.yaml       <- List of {source_file, checksum, priority, prompt}
+                deploy_user.yaml     <- List of {source_file, checksum, priority, prompt}
+            others/
+                system_prompts.yaml
+                eval_user.yaml
+                deploy_user.yaml
+    
     Args:
-        input_dir (str): Directory containing the YAML files.
+        input_dir (str): Base directory for model (e.g., steer_formatted_prompts/qwen_qwen3-32b).
         mode (str): Either 'eval' or 'deploy'.
-
+        priority (str): Priority subdirectory to load from. Default: 'high-awareness'. 
+                       Options: 'high-awareness', 'others'.
+    
     Returns:
-        tuple[list, list]: (common_sys, user_list)
+        tuple: (system_prompts, user_prompts, sources, checksums)
+              All lists are aligned - index i corresponds to the same source file and checksum
     """
     valid_modes = {"eval": "eval_user.yaml", "deploy": "deploy_user.yaml"}
     if mode not in valid_modes:
         raise ValueError(f"Invalid mode '{mode}'. Must be one of: {list(valid_modes.keys())}")
-
-    filenames = ["common_sys.yaml", valid_modes[mode]]
-
-    loaded_data = {}
-    for filename in filenames:
-        path = os.path.join(input_dir, filename)
-        if not os.path.exists(path):
-            print(f"⚠️ Warning: {filename} not found in {input_dir}")
-            loaded_data[filename] = []
-            continue
-
-        with open(path, "r") as f:
-            try:
-                loaded_data[filename] = yaml.safe_load(f) or []
-            except yaml.YAMLError as e:
-                print(f"❌ Error parsing {filename}: {e}")
-                loaded_data[filename] = []
-
-    return loaded_data["common_sys.yaml"], loaded_data[valid_modes[mode]]
-
-
-def load_prompts_with_metadata(input_dir: str, mode: str):
-    """
-    Load YAML prompts with metadata (source file and category).
-    Ensures system prompts and user prompts are properly paired by source file.
-    Categories are: explicit, implicit, no_detected_awareness
     
-    Args:
-        input_dir (str): Directory containing the YAML files.
-        mode (str): Either 'eval' or 'deploy'.
+    # Construct path with priority subdirectory
+    priority_dir = os.path.join(input_dir, priority)
     
-    Returns:
-        tuple: (system_prompts, user_prompts, sources, categories)
-              All lists are aligned - index i corresponds to the same source file
-    """
-    valid_modes = {"eval": "eval_user.yaml", "deploy": "deploy_user.yaml"}
-    if mode not in valid_modes:
-        raise ValueError(f"Invalid mode '{mode}'. Must be one of: {list(valid_modes.keys())}")
+    if not os.path.exists(priority_dir):
+        raise FileNotFoundError(f"Priority directory not found: {priority_dir}")
     
     # Load system prompts
-    sys_path = os.path.join(input_dir, "system_prompts.yaml")
-    user_path = os.path.join(input_dir, valid_modes[mode])
+    sys_path = os.path.join(priority_dir, "system_prompts.yaml")
+    user_path = os.path.join(priority_dir, valid_modes[mode])
     
-    # Parse into dictionaries keyed by source file
-    sys_dict = {}  # source -> (prompt, category)
-    user_dict = {}  # source -> (prompt, category)
+    if not os.path.exists(sys_path):
+        raise FileNotFoundError(f"System prompts file not found: {sys_path}")
+    if not os.path.exists(user_path):
+        raise FileNotFoundError(f"User prompts file not found: {user_path}")
     
-    # Parse system prompts with metadata
+    # Load system prompts YAML
     with open(sys_path, "r") as f:
-        lines = f.readlines()
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            if line.startswith("# Source:"):
-                # Extract source and category
-                parts = line[9:].split(", Category: ")
-                source = parts[0].strip()
-                category = parts[1].strip() if len(parts) > 1 else "unknown"
-                
-                # Next lines should be the YAML list item
-                yaml_content = ""
-                i += 1
-                while i < len(lines) and not lines[i].strip().startswith("# Source:"):
-                    yaml_content += lines[i]
-                    i += 1
-                
-                # Parse the YAML content
-                try:
-                    parsed = yaml.safe_load(yaml_content)
-                    if parsed and len(parsed) > 0:
-                        sys_dict[source] = (parsed[0], category)
-                except:
-                    pass
-            else:
-                i += 1
+        sys_data = yaml.safe_load(f)
     
-    # Parse user prompts with metadata
+    # Load user prompts YAML
     with open(user_path, "r") as f:
-        lines = f.readlines()
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            if line.startswith("# Source:"):
-                # Extract source and category
-                parts = line[9:].split(", Category: ")
-                source = parts[0].strip()
-                category = parts[1].strip() if len(parts) > 1 else "unknown"
-                
-                # Next lines should be the YAML list item
-                yaml_content = ""
-                i += 1
-                while i < len(lines) and not lines[i].strip().startswith("# Source:"):
-                    yaml_content += lines[i]
-                    i += 1
-                
-                # Parse the YAML content
-                try:
-                    parsed = yaml.safe_load(yaml_content)
-                    if parsed and len(parsed) > 0:
-                        user_dict[source] = (parsed[0], category)
-                except:
-                    pass
-            else:
-                i += 1
+        user_data = yaml.safe_load(f)
+    
+    if not isinstance(sys_data, list):
+        raise ValueError(f"Expected list in {sys_path}, got {type(sys_data)}")
+    if not isinstance(user_data, list):
+        raise ValueError(f"Expected list in {user_path}, got {type(user_data)}")
+    
+    # Create dictionaries keyed by checksum for fast lookup
+    # checksum -> {source_file, priority, prompt, index}
+    sys_dict = {}
+    for idx, entry in enumerate(sys_data):
+        if not isinstance(entry, dict):
+            print(f"Warning: Skipping invalid system prompt entry at index {idx}")
+            continue
+        
+        checksum = entry.get('checksum')
+        if not checksum:
+            print(f"Warning: System prompt entry at index {idx} missing checksum, skipping")
+            continue
+        
+        sys_dict[checksum] = {
+            'source_file': entry.get('source_file', 'unknown'),
+            'priority': entry.get('priority', 'unknown'),
+            'prompt': entry.get('prompt', ''),
+            'index': idx
+        }
+    
+    user_dict = {}
+    for idx, entry in enumerate(user_data):
+        if not isinstance(entry, dict):
+            print(f"Warning: Skipping invalid user prompt entry at index {idx}")
+            continue
+        
+        checksum = entry.get('checksum')
+        if not checksum:
+            print(f"Warning: User prompt entry at index {idx} missing checksum, skipping")
+            continue
+        
+        user_dict[checksum] = {
+            'source_file': entry.get('source_file', 'unknown'),
+            'priority': entry.get('priority', 'unknown'),
+            'prompt': entry.get('prompt', ''),
+            'index': idx
+        }
     
     # Create aligned lists - only include entries that have both system and user prompts
+    # matched by checksum
     system_prompts = []
     user_prompts = []
     sources = []
-    categories = []
+    checksums = []
     
-    # Iterate through user prompts and match with system prompts
-    for source in user_dict.keys():
-        if source in sys_dict:
-            user_prompt, user_cat = user_dict[source]
-            sys_prompt, sys_cat = sys_dict[source]
+    # Iterate through user prompts and match with system prompts by checksum
+    for checksum in sorted(user_dict.keys()):
+        if checksum in sys_dict:
+            user_entry = user_dict[checksum]
+            sys_entry = sys_dict[checksum]
             
-            # Verify categories match (they should from same file)
-            if user_cat == sys_cat:
-                system_prompts.append(sys_prompt)
-                user_prompts.append(user_prompt)
-                sources.append(source)
-                categories.append(user_cat)
-            else:
-                print(f"Warning: Category mismatch for {source}: sys={sys_cat}, user={user_cat}")
+            # Verify source files match (they should)
+            if user_entry['source_file'] != sys_entry['source_file']:
+                print(f"Warning: Source file mismatch for checksum {checksum[:16]}...")
+                print(f"  System: {sys_entry['source_file']}")
+                print(f"  User: {user_entry['source_file']}")
+                continue
+            
+            # Verify priorities match (they should)
+            if user_entry['priority'] != sys_entry['priority']:
+                print(f"Warning: Priority mismatch for checksum {checksum[:16]}...")
+                print(f"  System: {sys_entry['priority']}")
+                print(f"  User: {user_entry['priority']}")
+                continue
+            
+            system_prompts.append(sys_entry['prompt'])
+            user_prompts.append(user_entry['prompt'])
+            sources.append(user_entry['source_file'])
+            checksums.append(checksum)
     
     # Print summary
-    print(f"Loaded {len(system_prompts)} matched prompt pairs")
-    print(f"Categories found: {set(categories)}")
-    category_counts = {}
-    for cat in categories:
-        category_counts[cat] = category_counts.get(cat, 0) + 1
-    for cat in sorted(category_counts.keys()):
-        print(f"  {cat}: {category_counts[cat]}")
+    print(f"Loaded {len(system_prompts)} matched prompt pairs from {priority_dir}")
+    print(f"Mode: {mode}, Priority: {priority}")
     
     # Check for unmatched entries
     unmatched_sys = set(sys_dict.keys()) - set(user_dict.keys())
     unmatched_user = set(user_dict.keys()) - set(sys_dict.keys())
     if unmatched_sys:
         print(f"Warning: {len(unmatched_sys)} system prompts without matching user prompts")
+        if len(unmatched_sys) <= 5:
+            for checksum in list(unmatched_sys)[:5]:
+                print(f"  - {sys_dict[checksum]['source_file']} ({checksum[:16]}...)")
     if unmatched_user:
         print(f"Warning: {len(unmatched_user)} user prompts without matching system prompts")
+        if len(unmatched_user) <= 5:
+            for checksum in list(unmatched_user)[:5]:
+                print(f"  - {user_dict[checksum]['source_file']} ({checksum[:16]}...)")
     
-    return system_prompts, user_prompts, sources, categories
+    return system_prompts, user_prompts, sources, checksums
 
 
 def create_user_token_mask(
