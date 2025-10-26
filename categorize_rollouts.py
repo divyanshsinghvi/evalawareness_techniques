@@ -22,7 +22,7 @@ import hashlib
 import traceback
 
 # Import from score_awareness_with_llm.py
-from score_awareness_with_llm import compute_checksum, score_batch, AsyncOpenAI
+from score_awareness_with_llm import compute_checksum, score_batch, score_response, AsyncOpenAI
 
 
 def calculate_file_checksum(file_path: Path) -> str:
@@ -259,6 +259,11 @@ async def main():
         print("Error: --force and --skip-existing cannot be used together")
         return 1
 
+    # Validate judge model
+    if "qwen3-32b" not in args.judge_model.lower():
+        print(f"Error: Judge model must be qwen3-32b, got: {args.judge_model}")
+        return 1
+
     rollout_dir = Path('working/rollouts') / args.model_dir
     categorization_dir = Path('working/categorization') / args.model_dir
 
@@ -276,7 +281,7 @@ async def main():
     print(f"Concurrency: {args.concurrency}")
     print()
 
-    # Initialize client
+    # Initialize OpenRouter client
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         print("Error: OPENROUTER_API_KEY not set")

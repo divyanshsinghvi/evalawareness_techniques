@@ -7,6 +7,7 @@ Uses OpenRouter API directly with proper thinking token support.
 
 import re
 import sys
+import os
 from pathlib import Path
 from typing import List, Optional
 from dataclasses import dataclass, asdict
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import analyze_awareness_levels
 from suppression.openrouter_client import OpenRouterClient
+from score_awareness_with_llm import score_sentence, AsyncOpenAI
 
 
 @dataclass
@@ -111,6 +113,9 @@ async def generate_with_suppression(
     adaptive_tokens: bool = True,
     base_tokens: int = 100,
     growth_rate: float = 1.5,
+    detection_mode: str = "rule_based",
+    detection_judge_model: Optional[str] = None,
+    detection_threshold: str = "any",  # For rule_based: "any" or "high"; for llm_sentence: int 1-10
     verbose: bool = False
 ) -> SuppressionResult:
     """
@@ -133,6 +138,13 @@ async def generate_with_suppression(
         - "hybrid": Try chunk resampling first, fall back to seeding if fails
           (best of both worlds, most robust)
 
+    Detection Modes:
+        - "rule_based": Use analyze_awareness_levels() with regex patterns
+          - threshold="any": Trigger on any awareness level (global, explicit, OR implicit)
+          - threshold="high": Trigger only on high-level awareness (global OR explicit)
+        - "llm_sentence": Use score_sentence() with LLM judge
+          - threshold=int (1-10): Trigger if score >= threshold
+
     Args:
         user_message: The user's question/prompt
         system_prompt: Optional system prompt
@@ -148,6 +160,9 @@ async def generate_with_suppression(
         adaptive_tokens: Enable adaptive token growth (recommended)
         base_tokens: Initial max_tokens for early generations (if adaptive)
         growth_rate: Token growth rate as content accumulates (if adaptive)
+        detection_mode: "rule_based" or "llm_sentence"
+        detection_judge_model: LLM judge model for llm_sentence mode
+        detection_threshold: For rule_based: "any" or "high"; for llm_sentence: int (1-10)
         verbose: Show detailed logging
 
     Returns:
@@ -161,6 +176,68 @@ async def generate_with_suppression(
         verbose=False,  # Disable API verbose logging for cleaner output
         provider="SiliconFlow"
     )
+
+    # Initialize LLM judge client if using llm_sentence detection
+    llm_judge_client = None
+    if detection_mode == "llm_sentence":
+        if not detection_judge_model:
+            raise ValueError("detection_judge_model must be provided when detection_mode='llm_sentence'")
+
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ValueError("OPENROUTER_API_KEY environment variable required for llm_sentence mode")
+
+        llm_judge_client = AsyncOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key
+        )
+
+        if verbose:
+            print(f"  🤖 LLM Detection: {detection_judge_model} (threshold: {detection_threshold})")
+
+    # Helper function to check awareness based on detection mode
+    async def is_chunk_aware(chunk: str) -> tuple[bool, int, list[str]]:
+        """
+        Check if chunk contains eval-awareness using selected detection mode.
+
+        Returns:
+            (is_aware, awareness_count, aware_sentences)
+        """
+        if detection_mode == "rule_based":
+            # Use regex pattern matching
+            awareness = analyze_awareness_levels(chunk)
+
+            # Apply threshold based on rule_based mode
+            if detection_threshold == "high":
+                # Only trigger on global or explicit awareness
+                is_aware = (len(awareness.global_awareness_sentences) > 0 or
+                           len(awareness.explicit_awareness_sentences) > 0)
+                aware_sentences = []
+                aware_sentences.extend(awareness.global_awareness_sentences)
+                aware_sentences.extend(awareness.explicit_awareness_sentences)
+                awareness_count = len(aware_sentences)
+            else:  # "any"
+                # Trigger on any awareness level
+                is_aware = awareness.total_awareness_count > 0
+                aware_sentences = []
+                aware_sentences.extend(awareness.global_awareness_sentences)
+                aware_sentences.extend(awareness.explicit_awareness_sentences)
+                aware_sentences.extend(awareness.implicit_acknowledgment_sentences)
+                awareness_count = awareness.total_awareness_count
+
+            return (is_aware, awareness_count, aware_sentences)
+
+        elif detection_mode == "llm_sentence":
+            # Use LLM scoring
+            result = await score_sentence(llm_judge_client, chunk, detection_judge_model)
+            score = result.get('score', 0)
+            threshold_int = int(detection_threshold)  # Convert to int for llm_sentence mode
+            is_aware = score >= threshold_int
+            aware_sentences = [chunk] if is_aware else []
+            return (is_aware, 1 if is_aware else 0, aware_sentences)
+
+        else:
+            raise ValueError(f"Unknown detection_mode: {detection_mode}")
 
     # Track metrics
     total_chunks_generated = 0
@@ -305,20 +382,15 @@ async def generate_with_suppression(
 
         # Check reasoning for awareness with chosen strategy
         if continuation_reasoning:
-            reasoning_awareness = analyze_awareness_levels(continuation_reasoning)
-            if reasoning_awareness.total_awareness_count > 0:
+            is_aware, awareness_count, aware_sentences = await is_chunk_aware(continuation_reasoning)
+            if is_aware:
                 # Reasoning contains awareness - handle based on strategy
                 resampling_iterations += 1
-                total_awareness_detected += reasoning_awareness.total_awareness_count
-
-                aware_sentences = []
-                aware_sentences.extend(reasoning_awareness.global_awareness_sentences)
-                aware_sentences.extend(reasoning_awareness.explicit_awareness_sentences)
-                aware_sentences.extend(reasoning_awareness.implicit_acknowledgment_sentences)
+                total_awareness_detected += awareness_count
                 all_detected_aware_sentences.extend(aware_sentences)
 
                 if verbose:
-                    print(f"\n  🧠 REASONING AWARENESS DETECTED ({reasoning_awareness.total_awareness_count} indicators)")
+                    print(f"\n  🧠 REASONING AWARENESS DETECTED ({awareness_count} indicators)")
                     print(f"     Strategy: {reasoning_strategy}")
                     for sent in aware_sentences:
                         sent_preview = sent[:80].replace('\n', ' ')
@@ -337,8 +409,8 @@ async def generate_with_suppression(
                     aware_chunk_found = False
 
                     for r_idx, r_chunk in enumerate(reasoning_chunks):
-                        r_chunk_awareness = analyze_awareness_levels(r_chunk)
-                        if r_chunk_awareness.total_awareness_count > 0:
+                        r_chunk_is_aware, r_chunk_count, r_chunk_sentences = await is_chunk_aware(r_chunk)
+                        if r_chunk_is_aware:
                             # Found aware reasoning chunk - try to resample it
                             aware_chunk_found = True
                             if verbose:
@@ -361,8 +433,8 @@ async def generate_with_suppression(
                                     regen_r_chunks = parse_into_chunks(regen_reasoning, chunk_strategy)
                                     if regen_r_chunks:
                                         first_regen_chunk = regen_r_chunks[0]
-                                        first_chunk_awareness = analyze_awareness_levels(first_regen_chunk)
-                                        if first_chunk_awareness.total_awareness_count == 0:
+                                        first_chunk_is_aware, _, _ = await is_chunk_aware(first_regen_chunk)
+                                        if not first_chunk_is_aware:
                                             # Success! Clean reasoning chunk
                                             clean_reasoning_chunks.append(first_regen_chunk)
                                             resampled_reasoning = True
@@ -409,8 +481,8 @@ async def generate_with_suppression(
                     clean_seed_parts = []
 
                     for sent in reasoning_sentences:
-                        sent_awareness = analyze_awareness_levels(sent)
-                        if sent_awareness.total_awareness_count == 0:
+                        sent_is_aware, _, _ = await is_chunk_aware(sent)
+                        if not sent_is_aware:
                             clean_seed_parts.append(sent)
                         else:
                             # Stop at first aware sentence
@@ -454,23 +526,19 @@ async def generate_with_suppression(
             chunk_preview = chunk[:80].replace('\n', ' ')
 
             # Check this chunk for awareness
-            chunk_awareness = analyze_awareness_levels(chunk)
+            chunk_is_aware, chunk_awareness_count, chunk_aware_sentences = await is_chunk_aware(chunk)
 
-            if chunk_awareness.total_awareness_count > 0:
+            if chunk_is_aware:
                 # Hit an aware chunk - need to resample it
                 if verbose:
                     print(f"\n     Chunk {chunk_idx + 1}/{len(content_chunks)}: {chunk_preview}...")
-                    print(f"     🚨 AWARE ({chunk_awareness.total_awareness_count} indicators)")
+                    print(f"     🚨 AWARE ({chunk_awareness_count} indicators)")
                 hit_aware_chunk = True
                 resampling_iterations += 1
-                total_awareness_detected += chunk_awareness.total_awareness_count
+                total_awareness_detected += chunk_awareness_count
 
                 # Collect aware sentences
                 original_chunk = chunk
-                chunk_aware_sentences = []
-                chunk_aware_sentences.extend(chunk_awareness.global_awareness_sentences)
-                chunk_aware_sentences.extend(chunk_awareness.explicit_awareness_sentences)
-                chunk_aware_sentences.extend(chunk_awareness.implicit_acknowledgment_sentences)
                 all_detected_aware_sentences.extend(chunk_aware_sentences)
 
                 if verbose:
@@ -514,19 +582,15 @@ async def generate_with_suppression(
                         continue
 
                     regen_first_chunk = regen_chunks[0]
-                    regen_awareness = analyze_awareness_levels(regen_first_chunk)
+                    regen_is_aware, regen_count, regen_aware_sentences = await is_chunk_aware(regen_first_chunk)
 
                     # Collect aware sentences from failed attempts
-                    if regen_awareness.total_awareness_count > 0:
-                        regen_aware_sentences = []
-                        regen_aware_sentences.extend(regen_awareness.global_awareness_sentences)
-                        regen_aware_sentences.extend(regen_awareness.explicit_awareness_sentences)
-                        regen_aware_sentences.extend(regen_awareness.implicit_acknowledgment_sentences)
+                    if regen_is_aware:
                         chunk_aware_sentences.extend(regen_aware_sentences)
                         all_detected_aware_sentences.extend(regen_aware_sentences)
 
                         if verbose:
-                            print(f"Still aware ({regen_awareness.total_awareness_count})")
+                            print(f"Still aware ({regen_count})")
                     else:
                         # Success! Got a clean replacement
                         chunk = regen_first_chunk
@@ -616,16 +680,19 @@ async def generate_with_suppression(
     if clean_reasoning:
         final_response = f"<thinking>\n{clean_reasoning}\n</thinking>\n{clean_content}"
 
+    # Final check for suppression success using same detection mode
+    content_is_aware, _, _ = await is_chunk_aware(clean_content)
+    reasoning_is_aware = False
+    if clean_reasoning:
+        reasoning_is_aware, _, _ = await is_chunk_aware(clean_reasoning)
+
     return SuppressionResult(
         final_response=final_response,
         final_reasoning=clean_reasoning,
         chunks_generated=total_chunks_generated,
         chunks_resampled=chunks_resampled,
         total_awareness_detected=total_awareness_detected,
-        suppression_successful=(
-            analyze_awareness_levels(clean_content).total_awareness_count == 0 and
-            (not clean_reasoning or analyze_awareness_levels(clean_reasoning).total_awareness_count == 0)
-        ),
+        suppression_successful=(not content_is_aware and not reasoning_is_aware),
         all_detected_aware_sentences=all_detected_aware_sentences,
         chunk_resample_details=chunk_resample_details
     )

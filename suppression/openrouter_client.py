@@ -60,6 +60,7 @@ class OpenRouterClient:
             if verbose:
                 print(f"Auto-detected thinking tag: <{self.thinking_tag}> for model {model}")
         else:
+            raise("Don't use put it in map the thinking token -_-")
             self.thinking_tag = thinking_tag
             if verbose:
                 print(f"Using specified thinking tag: <{self.thinking_tag}>")
