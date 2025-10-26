@@ -53,8 +53,7 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils import analyze_awareness_levels
-from onpolicy_suppression import generate_with_suppression, SuppressionResult
-from inspect_ai.model import ChatMessageSystem, ChatMessageUser
+from suppression import generate_with_suppression, SuppressionResult
 
 
 @dataclass
@@ -165,32 +164,22 @@ async def evaluate_single_transcript(
         )[:3]
     }
 
-    # Construct messages for suppression
-    messages = []
-
-    # Add system prompt if present
-    if transcript_data['system_prompt']:
-        messages.append(ChatMessageSystem(content=transcript_data['system_prompt']))
-
-    # Add evaluation user message
-    messages.append(ChatMessageUser(content=transcript_data['evaluation_user_message']))
-
     # Run on-policy suppression
     print(f"   Running suppression on: {transcript_data['prompt_id']} seed {transcript_data['seed']}")
     print(f"   Original awareness: {original_awareness['total_count']} sentences")
 
-    # Prepare model name - add openrouter prefix if needed
+    # Prepare model name - keep as-is for OpenRouter
     model_name = transcript_data['model']
-    if '/' in model_name and not model_name.startswith('openrouter/'):
-        model_name = f"openrouter/{model_name}"
 
     suppression_result = await generate_with_suppression(
-        messages=messages,
-        tools=[],  # No tools for now
+        user_message=transcript_data['evaluation_user_message'],
+        system_prompt=transcript_data['system_prompt'] or None,
         model_name=model_name,
         chunk_strategy=chunk_strategy,
         max_iterations=max_iterations,
         max_resample_attempts_per_chunk=max_resample_attempts,
+        temperature=1.0,
+        max_tokens=4000,
         verbose=verbose
     )
 

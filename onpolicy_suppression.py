@@ -53,16 +53,16 @@ async def generate_with_suppression(
     """
     Generate target AI response with on-policy awareness suppression.
 
-    INCREMENTAL Strategy:
+    EFFICIENT INCREMENTAL Strategy:
     1. Generate continuation from current prefix
-    2. Extract FIRST chunk only
-    3. Check if chunk is eval-aware
-    4. If aware: regenerate and check first chunk again (up to max_resample_attempts)
-    5. If clean: add chunk to prefix, repeat from step 1
+    2. Check chunks sequentially until hitting an aware chunk
+    3. Add ALL consecutive clean chunks to prefix (maximally efficient!)
+    4. If we hit an aware chunk: resample it (up to max_resample_attempts)
+    5. Continue from where we left off
     6. Continue until we have a complete response (e.g., contains \\boxed{})
 
-    This is maximally efficient - we never generate/check more chunks than needed.
-    The model never sees its own eval-aware output.
+    This is maximally efficient - we use all clean sentences from each generation.
+    Still maintains on-policy purity: P(s2|prefix,s1) = P(s2|prefix+s1) for autoregressive models.
 
     Args:
         messages: Conversation history to generate from
@@ -93,7 +93,7 @@ async def generate_with_suppression(
     clean_prefix = ""
 
     # Generate chunk-by-chunk until we have complete response
-    # max_iterations now limits resampling operations, not total chunks
+    # max_iterations limits resampling operations, not total chunks
     while resampling_iterations < max_iterations:
         # Build messages with current clean prefix
         if clean_prefix:
@@ -105,16 +105,10 @@ async def generate_with_suppression(
 
         if verbose:
             print(f"\n{'='*80}")
-            print(f"Chunk {total_chunks_generated + 1} | Resampling iterations used: {resampling_iterations}/{max_iterations}")
+            print(f"Generation {resampling_iterations + 1} | Resampling iterations used: {resampling_iterations}/{max_iterations}")
             print(f"Current prefix length: {len(clean_prefix)} chars")
             if clean_prefix:
                 print(f"Current prefix (last 200 chars): ...{clean_prefix[-200:]}")
-            print(f"\nMessages being sent to model:")
-            for i, msg in enumerate(current_messages):
-                role = msg.__class__.__name__.replace("ChatMessage", "")
-                #content_preview = msg.content[:150] + "..." if len(msg.content) > 150 else msg.content
-                content_preview = msg.content# + "..." if len(msg.content) > 150 else msg.content
-                print(f"  [{i}] {role}: {content_preview}")
             print(f"{'='*80}\n")
 
         # Generate continuation from current prefix
@@ -128,7 +122,7 @@ async def generate_with_suppression(
                 print("⚠️  No result from model, stopping")
             break
 
-        # Extract thinking (if present) and content
+        # Extract thinking (if present) - only check once per generation
         # For models with separate thinking tokens, we need to check both
         thinking_content = ""
         if result.choices and len(result.choices) > 0:
@@ -141,7 +135,7 @@ async def generate_with_suppression(
                         thinking_content = content_item.reasoning
                         break
 
-        # Extract ONLY the first chunk (from visible content)
+        # Parse continuation into chunks
         continuation = result.completion
         chunks = parse_into_chunks(continuation, chunk_strategy)
 
@@ -150,136 +144,172 @@ async def generate_with_suppression(
                 print("⚠️  No chunks parsed, stopping")
             break
 
-        first_chunk = chunks[0]
-        total_chunks_generated += 1
-
         if verbose:
-            print(f"Generated continuation ({len(chunks)} chunks total)")
+            print(f"Generated continuation with {len(chunks)} chunks")
             if thinking_content:
                 print(f"Thinking content: {thinking_content[:200]}...")
-            print(f"First chunk: {first_chunk}")
             print(f"Full continuation preview: {continuation[:300]}...")
 
-        # Check BOTH thinking and visible chunk for awareness
-        # Thinking tokens (if present) should also be checked
-        content_to_check = first_chunk
+        # Check thinking content once (if present) for awareness
         if thinking_content:
-            # If there's thinking, we need to check it for awareness too
-            # Combine thinking + visible for complete awareness check
-            content_to_check = thinking_content + "\n\n" + first_chunk
+            thinking_awareness = analyze_awareness_levels(thinking_content)
+            if thinking_awareness.total_awareness_count > 0:
+                # Thinking itself is aware - need to resample entire generation
+                resampling_iterations += 1
+                total_awareness_detected += thinking_awareness.total_awareness_count
 
-        awareness = analyze_awareness_levels(content_to_check)
+                chunk_aware_sentences = []
+                chunk_aware_sentences.extend(thinking_awareness.global_awareness_sentences)
+                chunk_aware_sentences.extend(thinking_awareness.explicit_awareness_sentences)
+                chunk_aware_sentences.extend(thinking_awareness.implicit_acknowledgment_sentences)
+                all_detected_aware_sentences.extend(chunk_aware_sentences)
 
-        if awareness.total_awareness_count > 0:
-            # Chunk is eval-aware! Try to resample
-            # This counts as 1 resampling iteration
-            resampling_iterations += 1
-            total_awareness_detected += awareness.total_awareness_count
-            resampled_successfully = False
+                if verbose:
+                    print(f"🚨 AWARE thinking detected! ({thinking_awareness.total_awareness_count} indicators)")
+                    print(f"   Must regenerate entire response")
 
-            # Collect aware sentences from original chunk
-            original_chunk = first_chunk
-            chunk_aware_sentences = []
-            chunk_aware_sentences.extend(awareness.global_awareness_sentences)
-            chunk_aware_sentences.extend(awareness.explicit_awareness_sentences)
-            chunk_aware_sentences.extend(awareness.implicit_acknowledgment_sentences)
-            all_detected_aware_sentences.extend(chunk_aware_sentences)
+                # Skip this entire generation and try again
+                continue
+
+        # Now process chunks sequentially - use ALL clean consecutive chunks!
+        chunks_added_this_generation = 0
+        hit_aware_chunk = False
+
+        for chunk_idx, chunk in enumerate(chunks):
+            total_chunks_generated += 1
 
             if verbose:
-                print(f"🚨 AWARE chunk detected! ({awareness.total_awareness_count} awareness indicators)")
-                print(f"   Aware sentences: {chunk_aware_sentences[:2]}")  # Show first 2
-                print(f"   Resampling (max {max_resample_attempts_per_chunk} attempts)...")
+                print(f"\nChunk {chunk_idx + 1}/{len(chunks)}: {chunk[:100]}...")
 
-            attempts_used = 0
-            for attempt in range(max_resample_attempts_per_chunk):
-                attempts_used = attempt + 1
+            # Check this chunk for awareness
+            chunk_awareness = analyze_awareness_levels(chunk)
 
-                if verbose:
-                    print(f"   Attempt {attempt + 1}...")
+            if chunk_awareness.total_awareness_count > 0:
+                # Hit an aware chunk - need to resample it
+                hit_aware_chunk = True
+                resampling_iterations += 1
+                total_awareness_detected += chunk_awareness.total_awareness_count
 
-                # Regenerate from same prefix
-                regen_result = await model.generate(
-                    input=current_messages,
-                    tools=tools
-                )
-
-                if not regen_result or not regen_result.completion:
-                    continue
-
-                # Extract first chunk of regenerated continuation
-                regen_chunks = parse_into_chunks(regen_result.completion, chunk_strategy)
-
-                if not regen_chunks:
-                    continue
-
-                regen_first_chunk = regen_chunks[0]
-                regen_awareness = analyze_awareness_levels(regen_first_chunk)
-
-                # Collect aware sentences from this regen attempt
-                if regen_awareness.total_awareness_count > 0:
-                    regen_aware_sentences = []
-                    regen_aware_sentences.extend(regen_awareness.global_awareness_sentences)
-                    regen_aware_sentences.extend(regen_awareness.explicit_awareness_sentences)
-                    regen_aware_sentences.extend(regen_awareness.implicit_acknowledgment_sentences)
-                    chunk_aware_sentences.extend(regen_aware_sentences)
-                    all_detected_aware_sentences.extend(regen_aware_sentences)
+                # Collect aware sentences
+                original_chunk = chunk
+                chunk_aware_sentences = []
+                chunk_aware_sentences.extend(chunk_awareness.global_awareness_sentences)
+                chunk_aware_sentences.extend(chunk_awareness.explicit_awareness_sentences)
+                chunk_aware_sentences.extend(chunk_awareness.implicit_acknowledgment_sentences)
+                all_detected_aware_sentences.extend(chunk_aware_sentences)
 
                 if verbose:
-                    print(f"   Regenerated chunk: {regen_first_chunk[:100]}...")
-                    print(f"   Awareness count: {regen_awareness.total_awareness_count}")
+                    print(f"🚨 AWARE chunk detected! ({chunk_awareness.total_awareness_count} indicators)")
+                    print(f"   Used {chunks_added_this_generation} clean chunks before this")
+                    print(f"   Resampling (max {max_resample_attempts_per_chunk} attempts)...")
 
-                if regen_awareness.total_awareness_count == 0:
-                    # Success! This chunk is clean
-                    first_chunk = regen_first_chunk
-                    chunks_resampled += 1
-                    resampled_successfully = True
+                # Try to resample this specific chunk
+                resampled_successfully = False
+                attempts_used = 0
 
-                    # Record resample details
+                for attempt in range(max_resample_attempts_per_chunk):
+                    attempts_used = attempt + 1
+
+                    if verbose:
+                        print(f"   Attempt {attempt + 1}...")
+
+                    # Regenerate from current prefix
+                    regen_result = await model.generate(
+                        input=current_messages if not clean_prefix else messages + [ChatMessageAssistant(content=clean_prefix)],
+                        tools=tools
+                    )
+
+                    if not regen_result or not regen_result.completion:
+                        continue
+
+                    # Extract first chunk of regenerated continuation
+                    regen_chunks = parse_into_chunks(regen_result.completion, chunk_strategy)
+
+                    if not regen_chunks:
+                        continue
+
+                    regen_first_chunk = regen_chunks[0]
+                    regen_awareness = analyze_awareness_levels(regen_first_chunk)
+
+                    # Collect aware sentences from failed attempts
+                    if regen_awareness.total_awareness_count > 0:
+                        regen_aware_sentences = []
+                        regen_aware_sentences.extend(regen_awareness.global_awareness_sentences)
+                        regen_aware_sentences.extend(regen_awareness.explicit_awareness_sentences)
+                        regen_aware_sentences.extend(regen_awareness.implicit_acknowledgment_sentences)
+                        chunk_aware_sentences.extend(regen_aware_sentences)
+                        all_detected_aware_sentences.extend(regen_aware_sentences)
+
+                        if verbose:
+                            print(f"   Still aware ({regen_awareness.total_awareness_count} indicators)")
+                    else:
+                        # Success! Got a clean replacement
+                        chunk = regen_first_chunk
+                        chunks_resampled += 1
+                        resampled_successfully = True
+
+                        # Record resample details
+                        chunk_resample_details.append(ChunkResampleInfo(
+                            chunk_index=total_chunks_generated - 1,
+                            original_chunk=original_chunk,
+                            attempts_needed=attempts_used,
+                            final_chunk=chunk,
+                            all_aware_sentences=chunk_aware_sentences
+                        ))
+
+                        if verbose:
+                            print(f"   ✓ Clean chunk found after {attempts_used} attempts!")
+                        break
+
+                if not resampled_successfully:
+                    # Failed to clean this chunk - stop
                     chunk_resample_details.append(ChunkResampleInfo(
-                        chunk_index=total_chunks_generated - 1,  # Use actual chunk position
+                        chunk_index=total_chunks_generated - 1,
                         original_chunk=original_chunk,
-                        attempts_needed=attempts_used,
-                        final_chunk=first_chunk,
+                        attempts_needed=max_resample_attempts_per_chunk,
+                        final_chunk="",
                         all_aware_sentences=chunk_aware_sentences
                     ))
 
                     if verbose:
-                        print(f"   ✓ Clean chunk found after {attempts_used} attempts!")
+                        print(f"   ✗ Failed to clean chunk after {max_resample_attempts_per_chunk} attempts")
+                        print(f"   Stopping suppression")
                     break
 
-            if not resampled_successfully:
-                # Couldn't clean this chunk after max attempts - stop
-                # Still record what we tried
-                chunk_resample_details.append(ChunkResampleInfo(
-                    chunk_index=total_chunks_generated - 1,  # Use actual chunk position
-                    original_chunk=original_chunk,
-                    attempts_needed=max_resample_attempts_per_chunk,
-                    final_chunk="",  # Failed to get clean chunk
-                    all_aware_sentences=chunk_aware_sentences
-                ))
+            # Add clean chunk to prefix
+            clean_prefix += chunk
+            chunks_added_this_generation += 1
 
-                if verbose:
-                    print(f"   ✗ Failed to clean chunk after {max_resample_attempts_per_chunk} attempts")
-                    print(f"   Total aware sentences from this chunk: {len(chunk_aware_sentences)}")
-                    print(f"   Stopping suppression")
-                break
-        else:
             if verbose:
-                print(f"✓ Clean chunk (no awareness)")
+                clean_or_resampled = "resampled" if hit_aware_chunk else "clean"
+                print(f"✓ Added {clean_or_resampled} chunk to prefix")
 
-        # Add clean chunk to prefix
-        clean_prefix += first_chunk
-        if verbose:
-            print(f"Added to prefix. New prefix length: {len(clean_prefix)} chars")
+            # If we hit an aware chunk and resampled it, stop processing this generation
+            # and generate fresh continuation from updated prefix
+            if hit_aware_chunk:
+                if verbose:
+                    print(f"Breaking from chunk loop after resampling")
+                break
 
-        # Check if we have a complete response
-        # Need both: \boxed{} AND substantial content (not just the answer)
+            # Check if we have a complete response
+            if "\\boxed{" in clean_prefix:
+                boxed_pos = clean_prefix.find("\\boxed{")
+                content_before_answer = clean_prefix[:boxed_pos].strip()
+
+                if len(content_before_answer) > 100 or clean_prefix.count('.') >= 3:
+                    if verbose:
+                        print(f"✓ Complete response detected (has \\boxed with substantial reasoning)")
+                    break
+
+        # If we didn't hit an aware chunk, we used all chunks from this generation
+        if not hit_aware_chunk:
+            if verbose:
+                print(f"\n✓ Used all {chunks_added_this_generation} chunks from this generation")
+
+        # Check completion again at generation level
         if "\\boxed{" in clean_prefix:
-            # Also check we have some reasoning (at least 3 chunks or 100 characters before \boxed)
             boxed_pos = clean_prefix.find("\\boxed{")
             content_before_answer = clean_prefix[:boxed_pos].strip()
-
-            # Consider complete if we have substantial reasoning before the answer
             if len(content_before_answer) > 100 or clean_prefix.count('.') >= 3:
                 break
 
