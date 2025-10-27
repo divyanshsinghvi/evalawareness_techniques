@@ -131,6 +131,8 @@ async def main():
                        help='Force reprocess all files (ignore checksum)')
     parser.add_argument('--skip-existing', action='store_true',
                        help='Skip files that exist (fast, no checksum verification)')
+    parser.add_argument('--prompt-list', type=str,
+                       help='Path to file containing prompt names to filter (e.g., high_awareness_high_change_prompts.txt)')
 
     args = parser.parse_args()
 
@@ -178,6 +180,39 @@ async def main():
     # Find rollout files
     rollout_files = list(rollout_dir.rglob('*.yaml'))
     rollout_files = [f for f in rollout_files if 'analysis' not in f.parts]
+
+    # Filter by prompt list if provided
+    if args.prompt_list:
+        prompt_list_path = Path(args.prompt_list)
+        if not prompt_list_path.exists():
+            print(f"Error: Prompt list file {args.prompt_list} not found!")
+            return 1
+
+        # Parse prompt names from the file
+        prompt_names = set()
+        with open(prompt_list_path) as f:
+            for line in f:
+                line = line.strip()
+                # Skip comments and empty lines
+                if not line or line.startswith('#'):
+                    continue
+                # Extract prompt name from lines like "Prompt: information_withholding_2025-10-24_04-25-40_ced2d7e1"
+                if line.startswith('Prompt:'):
+                    prompt_name = line.split(':', 1)[1].strip()
+                    prompt_names.add(prompt_name)
+
+        # Filter files to only include those matching prompt names (base name before _seed_)
+        filtered_files = []
+        for file in rollout_files:
+            # Extract base name (before _seed_)
+            match = re.match(r'(.+)_seed_\d+\.yaml$', file.name)
+            if match:
+                base_name = match.group(1)
+                if base_name in prompt_names:
+                    filtered_files.append(file)
+
+        print(f"Filtered {len(rollout_files)} files to {len(filtered_files)} files from prompt list")
+        rollout_files = filtered_files
 
     # Apply filtering
     if args.limit_prompts or args.limit_seeds:

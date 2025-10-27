@@ -108,20 +108,31 @@ def load_rollout_file(filepath: Path) -> RolloutData:
     deployment_response = deployment.get('assistant_response', deployment.get('response')) if deployment else None
     evaluation_response = evaluation.get('assistant_response', evaluation.get('response')) if evaluation else None
 
-    deployment_eval_quotes = extract_eval_aware_sentences(deployment_response) if deployment_response else []
-    evaluation_eval_quotes = extract_eval_aware_sentences(evaluation_response) if evaluation_response else []
-
-    # Analyze awareness levels
+    # Analyze awareness levels once per response (optimization: was being called twice before)
     deployment_awareness_level = "none"
     evaluation_awareness_level = "none"
+    deployment_eval_quotes = []
+    evaluation_eval_quotes = []
 
     if deployment_response:
         deployment_analysis = analyze_awareness_levels(deployment_response)
         deployment_awareness_level = deployment_analysis.highest_level
+        # Extract sentences from analysis result (up to 20 per level = 60 total max)
+        deployment_eval_quotes = (
+            deployment_analysis.global_awareness_sentences +
+            deployment_analysis.explicit_awareness_sentences +
+            deployment_analysis.implicit_acknowledgment_sentences
+        )
 
     if evaluation_response:
         evaluation_analysis = analyze_awareness_levels(evaluation_response)
         evaluation_awareness_level = evaluation_analysis.highest_level
+        # Extract sentences from analysis result (up to 20 per level = 60 total max)
+        evaluation_eval_quotes = (
+            evaluation_analysis.global_awareness_sentences +
+            evaluation_analysis.explicit_awareness_sentences +
+            evaluation_analysis.implicit_acknowledgment_sentences
+        )
 
     return RolloutData(
         filepath=filepath,
