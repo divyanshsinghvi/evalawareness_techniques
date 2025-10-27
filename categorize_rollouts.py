@@ -248,6 +248,8 @@ async def main():
                        help='Force reprocess all files (ignore checksum)')
     parser.add_argument('--skip-existing', action='store_true',
                        help='Skip files that exist (fast, no checksum verification)')
+    parser.add_argument('--prompt-list', type=str,
+                       help='Path to file containing prompt names to filter (YAML, CSV, or text format)')
 
     args = parser.parse_args()
 
@@ -259,6 +261,15 @@ async def main():
     if args.force and args.skip_existing:
         print("Error: --force and --skip-existing cannot be used together")
         return 1
+
+    # Validate prompt-list contains model-dir name (safety check)
+    if args.prompt_list:
+        if args.model_dir not in args.prompt_list:
+            print(f"Error: Prompt list path must contain model directory name '{args.model_dir}'")
+            print(f"  Prompt list: {args.prompt_list}")
+            print(f"  Model dir: {args.model_dir}")
+            print(f"  This prevents accidentally using the wrong model's prompt list.")
+            return 1
 
     rollout_dir = config.ROLLOUTS_DIR / args.model_dir
     categorization_dir = Path('working/categorization') / args.model_dir
@@ -291,6 +302,89 @@ async def main():
     # Find rollout files
     rollout_files = list(rollout_dir.rglob('*.yaml'))
     rollout_files = [f for f in rollout_files if 'analysis' not in f.parts]
+
+    # Filter by prompt list if provided
+    if args.prompt_list:
+        prompt_list_path = Path(args.prompt_list)
+        if not prompt_list_path.exists():
+            print(f"Error: Prompt list file {args.prompt_list} not found!")
+            return 1
+
+        # Parse prompt names from the file
+        prompt_names = set()
+        specific_file_paths = set()
+
+        # Check file format
+        if prompt_list_path.suffix.lower() in ['.yaml', '.yml']:
+            # YAML format with eval_awareness_buckets structure
+            with open(prompt_list_path) as f:
+                yaml_data = yaml.safe_load(f)
+
+            if 'eval_awareness_buckets' in yaml_data:
+                # Extract specific file paths from YAML
+                for bucket_name, bucket_data in yaml_data['eval_awareness_buckets'].items():
+                    for prompt_id, prompt_info in bucket_data.items():
+                        if 'seeds' in prompt_info:
+                            for seed_info in prompt_info['seeds']:
+                                if 'file_path' in seed_info:
+                                    # Just extract the filename - same filename exists in rollout dir
+                                    file_path = Path(seed_info['file_path'])
+                                    specific_file_paths.add(file_path.name)
+
+        elif prompt_list_path.suffix.lower() == '.csv':
+            # CSV format
+            import csv
+            with open(prompt_list_path) as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if 'prompt_name' in row:
+                        prompt_names.add(row['prompt_name'])
+                    else:
+                        # Fallback: use first column value
+                        first_col = next(iter(row.values()))
+                        if first_col:
+                            prompt_names.add(first_col)
+        else:
+            # Text format
+            with open(prompt_list_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if line.startswith('Prompt:'):
+                        prompt_name = line.split(':', 1)[1].strip()
+                        prompt_names.add(prompt_name)
+
+        # Apply filtering
+        if specific_file_paths:
+            # YAML with specific file names - extract exact (base_name, seed) combinations
+            yaml_combinations = set()
+            for filename in specific_file_paths:
+                spec_match = re.match(r'(.+)_seed_(\d+)\.yaml$', filename)
+                if spec_match:
+                    yaml_combinations.add((spec_match.group(1), spec_match.group(2)))
+
+            # Filter to only matching files
+            filtered_files = []
+            for rollout_file in rollout_files:
+                match = re.match(r'(.+)_seed_(\d+)\.yaml$', rollout_file.name)
+                if match and (match.group(1), match.group(2)) in yaml_combinations:
+                    filtered_files.append(rollout_file)
+
+            print(f"Filtered {len(rollout_files)} files to {len(filtered_files)} files from YAML prompt list")
+            rollout_files = filtered_files
+        elif prompt_names:
+            # CSV or text format - filter by prompt base name only
+            filtered_files = []
+            for file in rollout_files:
+                match = re.match(r'(.+)_seed_\d+\.yaml$', file.name)
+                if match:
+                    base_name = match.group(1)
+                    if base_name in prompt_names:
+                        filtered_files.append(file)
+
+            print(f"Filtered {len(rollout_files)} files to {len(filtered_files)} files from prompt list")
+            rollout_files = filtered_files
 
     # Apply filtering
     if args.limit_prompts or args.limit_seeds:

@@ -295,13 +295,8 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
             if attempt == max_retries - 1:
                 print(f"\nERROR scoring batch: {e}")
                 print(f"Raw response (first 200 chars): {content[:200] if 'content' in locals() else 'NO CONTENT'}")
-                # Return error for all sentences in batch
-                return [{
-                    'score': -1,
-                    'category': 'Error',
-                    'reasoning': f"Batch failed: {e}",
-                    'raw_response': content if 'content' in locals() else ''
-                } for _ in sentences]
+                # Re-raise exception so file is not saved
+                raise
             await asyncio.sleep(1)
 
 
