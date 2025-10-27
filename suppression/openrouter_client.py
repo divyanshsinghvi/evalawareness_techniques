@@ -42,7 +42,6 @@ class OpenRouterClient:
         temperature: float = 0.7,
         top_p: float = 1,
         max_tokens: int = 4000,
-        seed: int = 0,
         timeout: int = 300,
         verbose: bool = False,
         provider: Optional[Union[str, List[str]]] = None,
@@ -56,7 +55,6 @@ class OpenRouterClient:
         self.timeout = timeout
         self.verbose = verbose
         self.provider = provider  # Can be str or List[str]
-        self.seed = seed
 
         # Auto-detect thinking tag from model name if not provided
         if thinking_tag is None:

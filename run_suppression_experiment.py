@@ -21,12 +21,13 @@ import re
 import hashlib
 import traceback
 from datetime import datetime
+import config
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Import suppression engine
-from suppression.engine import generate_with_suppression
+from suppression.engine import generate_with_suppression, MaxResampleAttemptsExhausted, MaxIterationsExhausted
 
 # Import LLM judge from score_awareness_with_llm.py
 from score_awareness_with_llm import score_response, score_batch, AsyncOpenAI
@@ -49,23 +50,34 @@ async def extract_clean_reasoning_seed(
     max_sentences: int = None,
     detection_mode: str = "rule_based",
     detection_threshold: str = "any",
+    removal_mode: str = "self_test_only",
     judge_client = None,
     judge_model: str = None,
-    verbose: bool = False
+    verbose: bool = False,
+    rollout_file: Path = None,
+    model_dir: str = None
 ) -> tuple:
     """
     Extract clean reasoning seed from a response.
 
-    Collects ALL sentences that have no awareness indicators (score below threshold).
+    Processes sentences in order, collecting clean sentences until first awareness indicator is found.
+    STOPS at first aware sentence - all subsequent sentences are discarded.
+
+    For llm_sentence mode: Requires pre-computed categorization data (run categorize_rollouts.py first).
+    For rule_based mode: Uses on-the-fly pattern matching.
 
     Args:
         response: Full response with <thinking> tags
-        max_sentences: Maximum sentences to use as seed (None = use all clean sentences)
+        max_sentences: Maximum sentences to use as seed (None = use all sentences up to first aware)
         detection_mode: "rule_based" or "llm_sentence"
         detection_threshold: For rule_based: "any"/"high"; for llm_sentence: int 1-10
+        removal_mode: "all" (remove any awareness), "self_test_only" (only remove self_test awareness - DEFAULT),
+                      "self_and_other" (remove both self_test and other_test)
         judge_client: AsyncOpenAI client for LLM detection
         judge_model: Model name for LLM detection
         verbose: Print extraction details
+        rollout_file: Path to rollout file (for finding categorization data)
+        model_dir: Model directory name (for finding categorization data)
 
     Returns:
         tuple: (seed_string, stats_dict)
@@ -79,33 +91,146 @@ async def extract_clean_reasoning_seed(
 
     eval_reasoning = thinking_match.group(1).strip()
 
-    # Split into sentences
-    reasoning_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])|(?<=[.!?])\n+', eval_reasoning)
+    # Load existing categorization data (REQUIRED when using llm_sentence mode with file info)
+    use_existing_data = False
+    categorized_sentences = []
+
+    if rollout_file and model_dir and detection_mode == "llm_sentence":
+        # Construct path to categorization file
+        categorization_dir = Path('working/categorization') / model_dir
+        rollouts_dir = config.ROLLOUTS_DIR / model_dir
+
+        categorization_file = categorization_dir / rollout_file.relative_to(rollouts_dir)
+
+        if not categorization_file.exists():
+            raise FileNotFoundError(
+                f"Categorization data not found: {categorization_file}\n"
+                f"Please run categorize_rollouts.py first:\n"
+                f"  python categorize_rollouts.py --model-dir {model_dir}"
+            )
+
+        if verbose:
+            print(f"  📂 Loading categorization data: {categorization_file.name}")
+
+        with open(categorization_file) as f:
+            cat_data = yaml.safe_load(f)
+
+        # Get evaluation branch sentences (from thinking tags)
+        eval_categorized = cat_data.get('evaluation', {}).get('categorized_sentences', [])
+
+        # Filter to only thinking sentences
+        categorized_sentences = [s for s in eval_categorized if s.get('source') == 'thinking']
+
+        if not categorized_sentences:
+            raise ValueError(
+                f"No thinking sentences found in categorization data: {categorization_file}\n"
+                f"The categorization file may be corrupted or incomplete."
+            )
+
+        use_existing_data = True
+        if verbose:
+            print(f"  ✓ Using {len(categorized_sentences)} pre-scored sentences from categorization")
+
+    # Process sentences
     clean_reasoning_parts = []
+    removed_sentences = []  # Track removed sentences
 
-    for sent in reasoning_sentences:
-        # Check awareness using same detection mode as experiment
-        is_aware = False
+    if use_existing_data:
+        # Use pre-scored categorization data
+        threshold_int = int(detection_threshold)
 
-        if detection_mode == "rule_based":
-            sent_awareness = analyze_awareness_levels(sent)
-            if detection_threshold == "high":
-                # Only consider global or explicit awareness
-                is_aware = (len(sent_awareness.global_awareness_sentences) > 0 or
-                           len(sent_awareness.explicit_awareness_sentences) > 0)
-            else:  # "any"
-                is_aware = sent_awareness.total_awareness_count > 0
+        for idx, sent_data in enumerate(categorized_sentences):
+            sent = sent_data['sentence']
+            score = sent_data.get('score', 0)
+            test_ref_flag = sent_data.get('test_reference_flag', 'no_test_reference')
 
-        elif detection_mode == "llm_sentence":
-            if judge_client and judge_model:
-                result = await score_sentence(judge_client, sent, judge_model)
-                score = result.get('score', 0)
-                threshold_int = int(detection_threshold)
-                is_aware = score >= threshold_int
+            is_aware = score >= threshold_int
+            awareness_info = ""
 
-        if not is_aware:
-            clean_reasoning_parts.append(sent)
-        # Continue checking all sentences, don't break
+            # Apply removal mode filtering
+            if is_aware:
+                if removal_mode == "self_test_only":
+                    # Only remove if it's self_test awareness
+                    is_aware = (test_ref_flag == "self_test")
+                    if is_aware:
+                        awareness_info = f"score={score}, self_test"
+                    else:
+                        # It's aware but other_test or no_test_reference, so keep it
+                        awareness_info = f"score={score}, {test_ref_flag} (kept)"
+                        is_aware = False  # Override: don't remove
+                elif removal_mode == "all" or removal_mode == "self_and_other":
+                    # Remove any awareness regardless of test_reference_flag
+                    awareness_info = f"score={score}, {test_ref_flag}"
+                else:
+                    awareness_info = f"score={score}, {test_ref_flag}"
+
+            if not is_aware:
+                clean_reasoning_parts.append(sent)
+            else:
+                # Found awareness - record it and STOP processing
+                removed_sentences.append([idx + 1, sent, awareness_info])
+                # Discard all remaining sentences
+                for remaining_idx in range(idx + 1, len(categorized_sentences)):
+                    remaining_sent = categorized_sentences[remaining_idx]['sentence']
+                    removed_sentences.append([remaining_idx + 1, remaining_sent, "after aware sentence"])
+                break  # Stop processing
+
+    else:
+        # On-the-fly detection (for rule_based mode or when categorization not available)
+        reasoning_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])|(?<=[.!?])\n+', eval_reasoning)
+
+        for idx, sent in enumerate(reasoning_sentences):
+            # Check awareness using same detection mode as experiment
+            is_aware = False
+            awareness_info = ""
+
+            if detection_mode == "rule_based":
+                sent_awareness = analyze_awareness_levels(sent)
+                if detection_threshold == "high":
+                    # Only consider global or explicit awareness
+                    is_aware = (len(sent_awareness.global_awareness_sentences) > 0 or
+                               len(sent_awareness.explicit_awareness_sentences) > 0)
+                    if is_aware:
+                        awareness_info = "global/explicit awareness"
+                else:  # "any"
+                    is_aware = sent_awareness.total_awareness_count > 0
+                    if is_aware:
+                        awareness_info = f"{sent_awareness.total_awareness_count} awareness signals"
+
+            elif detection_mode == "llm_sentence":
+                if judge_client and judge_model:
+                    result = await score_sentence(judge_client, sent, judge_model)
+                    score = result.get('score', 0)
+                    test_ref_flag = result.get('test_reference_flag', 'no_test_reference')
+                    threshold_int = int(detection_threshold)
+                    is_aware = score >= threshold_int
+
+                    # Apply removal mode filtering
+                    if is_aware:
+                        if removal_mode == "self_test_only":
+                            # Only remove if it's self_test awareness
+                            is_aware = (test_ref_flag == "self_test")
+                            if is_aware:
+                                awareness_info = f"score={score}, self_test"
+                            else:
+                                # It's aware but other_test or no_test_reference, so keep it
+                                awareness_info = f"score={score}, {test_ref_flag} (kept)"
+                                is_aware = False  # Override: don't remove
+                        elif removal_mode == "all" or removal_mode == "self_and_other":
+                            # Remove any awareness regardless of test_reference_flag
+                            awareness_info = f"score={score}, {test_ref_flag}"
+                        else:
+                            awareness_info = f"score={score}, {test_ref_flag}"
+
+            if not is_aware:
+                clean_reasoning_parts.append(sent)
+            else:
+                # Found awareness - record it and STOP processing
+                removed_sentences.append([idx + 1, sent, awareness_info])
+                # Discard all remaining sentences
+                for remaining_idx in range(idx + 1, len(reasoning_sentences)):
+                    removed_sentences.append([remaining_idx + 1, reasoning_sentences[remaining_idx], "after aware sentence"])
+                break  # Stop processing
 
     # Use all clean sentences as seed (or limit to max_sentences if specified)
     if max_sentences is None:
@@ -115,23 +240,47 @@ async def extract_clean_reasoning_seed(
 
     seed_string = ' '.join(seed_sentences)
 
+    # Calculate total sentences based on which path we used
+    if use_existing_data:
+        total_sentences = len(categorized_sentences)
+    else:
+        total_sentences = len(clean_reasoning_parts) + len(removed_sentences)
+
     stats = {
         'original_reasoning_length': len(eval_reasoning),
-        'total_sentences': len(reasoning_sentences),
+        'total_sentences': total_sentences,
         'clean_sentences': len(clean_reasoning_parts),
+        'removed_sentences': len(removed_sentences),
         'seed_sentences_used': len(seed_sentences),
-        'seed_length': len(seed_string)
+        'seed_length': len(seed_string),
+        'removed_details': removed_sentences
     }
 
     if verbose:
         print(f"  Original reasoning: {stats['original_reasoning_length']} chars")
-        print(f"  Total clean sentences: {stats['clean_sentences']}/{stats['total_sentences']}")
+        print(f"  Total sentences before awareness: {stats['clean_sentences']}/{stats['total_sentences']}")
+
+        # Show removed sentences if any
+        if removed_sentences:
+            print(f"  ❌ Removed {len(removed_sentences)} sentence(s) (aware + all after it):")
+            for sent_idx, sent_text, info in removed_sentences:
+                sent_preview = sent_text[:100].replace('\n', ' ')
+                print(f"     [{sent_idx}] {sent_preview}... ({info})")
+
         if max_sentences is None:
-            print(f"  Using ALL {stats['seed_sentences_used']} clean sentences as seed ({stats['seed_length']} chars)")
+            print(f"  ✓ Using {stats['seed_sentences_used']} sentences as seed (up to first awareness) ({stats['seed_length']} chars)")
         else:
-            print(f"  Using first {stats['seed_sentences_used']} sentences as seed ({stats['seed_length']} chars)")
-        preview = seed_string[:200].replace('\n', ' ')
-        print(f"  Preview: {preview}...")
+            print(f"  ✓ Using first {stats['seed_sentences_used']} sentences as seed (limited) ({stats['seed_length']} chars)")
+
+        # Show preview with both start and end
+        if len(seed_string) > 400:
+            preview_start = seed_string[:200].replace('\n', ' ')
+            preview_end = seed_string[-200:].replace('\n', ' ')
+            print(f"  Preview (start): {preview_start}...")
+            print(f"  Preview (end): ...{preview_end}")
+        else:
+            preview = seed_string[:200].replace('\n', ' ')
+            print(f"  Preview: {preview}...")
 
     return seed_string, stats
 
@@ -147,8 +296,11 @@ async def process_rollout(
     temperature: float,
     semaphore: asyncio.Semaphore,
     judge_client: AsyncOpenAI,
+    model_dir: str,
     detection_mode: str = "rule_based",
     detection_threshold: str = "any",
+    removal_mode: str = "self_test_only",
+    base_seed: int = 0,
     skip_existing: bool = False,
     verbose: bool = False
 ) -> bool:
@@ -199,17 +351,21 @@ async def process_rollout(
         )
 
         # Extract clean reasoning seed from evaluation response using same detection method
+        # Collects sentences until first aware sentence, then stops
         initial_reasoning, seed_stats = await extract_clean_reasoning_seed(
             evaluation_original_response,
-            max_sentences=None,  # Use ALL clean sentences
+            max_sentences=None,  # Use all sentences up to first awareness
             detection_mode=detection_mode,
             detection_threshold=detection_threshold,
+            removal_mode=removal_mode,
             judge_client=judge_client,
             judge_model=judge_model,
-            verbose=verbose
+            verbose=verbose,
+            rollout_file=rollout_file,
+            model_dir=model_dir
         )
 
-        # Run suppression on both branches
+        # Run suppression on evaluation branch only (deployment has no eval context to suppress)
         async with semaphore:
             if verbose:
                 print(f"\n[DEBUG] Starting to process: {rollout_file.name}")
@@ -218,29 +374,8 @@ async def process_rollout(
                 print(f"{'='*80}")
                 if seed_stats:
                     print(f"CLEAN REASONING SEED EXTRACTION:")
-            # Suppress deployment
-            deployment_suppression_result = await generate_with_suppression(
-                user_message=deployment_user_msg,
-                system_prompt=system_prompt,
-                model_name=suppression_model,
-                chunk_strategy="sentence",
-                reasoning_strategy=strategy,
-                initial_reasoning=initial_reasoning,
-                initial_content="",
-                max_iterations=max_iterations,
-                max_resample_attempts_per_chunk=max_resample_attempts,
-                temperature=temperature,
-                max_tokens=1000,
-                adaptive_tokens=True,
-                base_tokens=100,
-                growth_rate=1.5,
-                detection_mode=detection_mode,
-                detection_judge_model=judge_model,
-                detection_threshold=detection_threshold,
-                verbose=verbose
-            )
 
-            # Suppress evaluation
+            # Suppress evaluation branch
             evaluation_suppression_result = await generate_with_suppression(
                 user_message=evaluation_user_msg,
                 system_prompt=system_prompt,
@@ -259,16 +394,13 @@ async def process_rollout(
                 detection_mode=detection_mode,
                 detection_judge_model=judge_model,
                 detection_threshold=detection_threshold,
+                base_seed=base_seed,
                 verbose=verbose
             )
 
-            # Score all responses with LLM judge
+            # Score responses with LLM judge
             deployment_original_score = await score_response(
                 judge_client, deployment_original_response, judge_model
-            )
-
-            deployment_suppressed_score = await score_response(
-                judge_client, deployment_suppression_result.final_response, judge_model
             )
 
             evaluation_original_score = await score_response(
@@ -281,7 +413,6 @@ async def process_rollout(
 
         # Analyze with rule-based detection for comparison
         deployment_original_awareness = analyze_awareness_levels(deployment_original_response)
-        deployment_suppressed_awareness = analyze_awareness_levels(deployment_suppression_result.final_response)
         evaluation_original_awareness = analyze_awareness_levels(evaluation_original_response)
         evaluation_suppressed_awareness = analyze_awareness_levels(evaluation_suppression_result.final_response)
 
@@ -300,45 +431,20 @@ async def process_rollout(
             },
             'deployment': {
                 'user_message': deployment_user_msg,
-                'original': {
-                    'response': deployment_original_response,
-                    'llm_judge_score': {
-                        'awareness_level': deployment_original_score.get('awareness_level'),
-                        'awareness_intensity': deployment_original_score.get('awareness_intensity'),
-                        'awareness_type': deployment_original_score.get('awareness_type'),
-                        'dominant_features': deployment_original_score.get('dominant_features', []),
-                        'response_summary': deployment_original_score.get('response_summary', '')
-                    },
-                    'rule_based_awareness': {
-                        'global_count': len(deployment_original_awareness.global_awareness_sentences),
-                        'explicit_count': len(deployment_original_awareness.explicit_awareness_sentences),
-                        'implicit_count': len(deployment_original_awareness.implicit_acknowledgment_sentences),
-                        'total_count': deployment_original_awareness.total_awareness_count,
-                        'highest_level': deployment_original_awareness.highest_level
-                    }
+                'response': deployment_original_response,
+                'llm_judge_score': {
+                    'awareness_level': deployment_original_score.get('awareness_level'),
+                    'awareness_intensity': deployment_original_score.get('awareness_intensity'),
+                    'awareness_type': deployment_original_score.get('awareness_type'),
+                    'dominant_features': deployment_original_score.get('dominant_features', []),
+                    'response_summary': deployment_original_score.get('response_summary', '')
                 },
-                'suppressed': {
-                    'response': deployment_suppression_result.final_response,
-                    'llm_judge_score': {
-                        'awareness_level': deployment_suppressed_score.get('awareness_level'),
-                        'awareness_intensity': deployment_suppressed_score.get('awareness_intensity'),
-                        'awareness_type': deployment_suppressed_score.get('awareness_type'),
-                        'dominant_features': deployment_suppressed_score.get('dominant_features', []),
-                        'response_summary': deployment_suppressed_score.get('response_summary', '')
-                    },
-                    'rule_based_awareness': {
-                        'global_count': len(deployment_suppressed_awareness.global_awareness_sentences),
-                        'explicit_count': len(deployment_suppressed_awareness.explicit_awareness_sentences),
-                        'implicit_count': len(deployment_suppressed_awareness.implicit_acknowledgment_sentences),
-                        'total_count': deployment_suppressed_awareness.total_awareness_count,
-                        'highest_level': deployment_suppressed_awareness.highest_level
-                    },
-                    'suppression_metrics': {
-                        'chunks_generated': deployment_suppression_result.chunks_generated,
-                        'chunks_resampled': deployment_suppression_result.chunks_resampled,
-                        'total_awareness_detected': deployment_suppression_result.total_awareness_detected,
-                        'suppression_successful': deployment_suppression_result.suppression_successful
-                    }
+                'rule_based_awareness': {
+                    'global_count': len(deployment_original_awareness.global_awareness_sentences),
+                    'explicit_count': len(deployment_original_awareness.explicit_awareness_sentences),
+                    'implicit_count': len(deployment_original_awareness.implicit_acknowledgment_sentences),
+                    'total_count': deployment_original_awareness.total_awareness_count,
+                    'highest_level': deployment_original_awareness.highest_level
                 }
             },
             'evaluation': {
@@ -385,17 +491,9 @@ async def process_rollout(
                 }
             },
             'comparison': {
-                'deployment_llm_intensity_reduction': (
-                    deployment_original_score.get('awareness_intensity', 0) -
-                    deployment_suppressed_score.get('awareness_intensity', 0)
-                ),
                 'evaluation_llm_intensity_reduction': (
                     evaluation_original_score.get('awareness_intensity', 0) -
                     evaluation_suppressed_score.get('awareness_intensity', 0)
-                ),
-                'deployment_rule_based_reduction': (
-                    deployment_original_awareness.total_awareness_count -
-                    deployment_suppressed_awareness.total_awareness_count
                 ),
                 'evaluation_rule_based_reduction': (
                     evaluation_original_awareness.total_awareness_count -
@@ -410,6 +508,48 @@ async def process_rollout(
             yaml.dump(output_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
         return True
+
+    except MaxResampleAttemptsExhausted as e:
+        import sys
+        error_msg = (
+            f"\n{'='*80}\n"
+            f"MAX RESAMPLE ATTEMPTS EXHAUSTED: {rollout_file.name}\n"
+            f"{'='*80}\n"
+            f"Failed to clean chunk {e.chunk_index} after {e.max_attempts} attempts.\n"
+            f"Found {len(e.aware_sentences)} awareness-containing sentence(s) that could not be removed.\n"
+            f"\n"
+            f"SOLUTION: Increase the --max-resample-attempts parameter.\n"
+            f"  Current: {e.max_attempts}\n"
+            f"  Suggested: {e.max_attempts * 2} or higher\n"
+            f"\n"
+            f"Example:\n"
+            f"  python run_suppression_experiment.py ... --max-resample-attempts {e.max_attempts * 2}\n"
+            f"{'='*80}\n\n"
+        )
+        sys.stderr.write(error_msg)
+        sys.stderr.flush()
+        return False
+
+    except MaxIterationsExhausted as e:
+        import sys
+        error_msg = (
+            f"\n{'='*80}\n"
+            f"MAX ITERATIONS EXHAUSTED: {rollout_file.name}\n"
+            f"{'='*80}\n"
+            f"Reached max_iterations ({e.max_iterations}) without completing response.\n"
+            f"Generated {e.response_length} characters so far, but no \\boxed{{}} answer found.\n"
+            f"\n"
+            f"SOLUTION: Increase the --max-iterations parameter.\n"
+            f"  Current: {e.max_iterations}\n"
+            f"  Suggested: {e.max_iterations + 10} or higher\n"
+            f"\n"
+            f"Example:\n"
+            f"  python run_suppression_experiment.py ... --max-iterations {e.max_iterations + 10}\n"
+            f"{'='*80}\n\n"
+        )
+        sys.stderr.write(error_msg)
+        sys.stderr.flush()
+        return False
 
     except Exception as e:
         import sys
@@ -436,7 +576,7 @@ async def main():
                        help='Max suppression iterations (default: 15)')
     parser.add_argument('--max-resample-attempts', type=int, default=5,
                        help='Max resample attempts per chunk (default: 5)')
-    parser.add_argument('--temperature', type=float, default=1.0,
+    parser.add_argument('--temperature', type=float, default=config.SUPPRESSION_TEMPERATURE,
                        help='Temperature for generation (default: 1.0)')
     parser.add_argument('--concurrency', type=int, default=5,
                        help='Parallel file processing (default: 5)')
@@ -459,6 +599,11 @@ async def main():
                        help='For rule_based: "any" or "high". For llm_sentence: int 1-10 (default: any for rule_based, 5 for llm_sentence)')
     parser.add_argument('--prompt-list', type=str,
                        help='Path to file containing prompt names to filter (e.g., high_awareness_high_change_prompts.txt)')
+    parser.add_argument('--seed', type=int, default=0,
+                       help='Base seed for suppression (default: 0). Use different values for multiple runs with varied seeds.')
+    parser.add_argument('--removal-mode', default='self_test_only',
+                       choices=['all', 'self_test_only', 'self_and_other'],
+                       help='Which awareness to remove from seed: "all" (any awareness), "self_test_only" (only when model knows IT is tested), "self_and_other" (both types). Default: self_test_only')
 
     args = parser.parse_args()
 
@@ -466,6 +611,16 @@ async def main():
     if args.limit and (args.limit_prompts or args.limit_seeds):
         print("Error: --limit cannot be used with --limit-prompts or --limit-seeds")
         return
+
+    # Validate prompt-list contains model-dir name (safety check)
+    if args.prompt_list:
+        prompt_list_path = Path(args.prompt_list)
+        if args.model_dir not in str(prompt_list_path):
+            print(f"Error: Prompt list path must contain model directory name '{args.model_dir}'")
+            print(f"  Prompt list: {args.prompt_list}")
+            print(f"  Model dir: {args.model_dir}")
+            print(f"  This prevents accidentally using the wrong model's prompt list.")
+            return
 
     # Determine threshold value
     if args.detection_mode == "rule_based":
@@ -476,10 +631,11 @@ async def main():
         except:
             detection_threshold = "5"
 
-    # Paths - include threshold in directory name
+    # Paths - include threshold and removal mode in directory name
     rollouts_dir = Path('working/rollouts') / args.model_dir
     threshold_str = f"thresh_{detection_threshold}"
-    output_dir = Path('working/suppression_experiments') / args.experiment_name / f"{args.detection_mode}_{threshold_str}" / args.model_dir
+    removal_str = args.removal_mode.replace('_', '')  # self_test_only -> selftestonly for shorter paths
+    output_dir = Path('working/suppression_experiments') / args.experiment_name / f"{args.detection_mode}_{threshold_str}_{removal_str}" / args.model_dir
 
     if not rollouts_dir.exists():
         print(f"Error: Rollouts directory not found: {rollouts_dir}")
@@ -500,28 +656,88 @@ async def main():
             print(f"Error: Prompt list file {args.prompt_list} not found!")
             return
 
-        # Parse prompt names from the file
+        # Parse prompt names/file paths from the file
         prompt_names = set()
-        with open(prompt_list_path) as f:
-            for line in f:
-                line = line.strip()
-                # Skip comments and empty lines
-                if not line or line.startswith('#'):
-                    continue
-                # Extract prompt name from lines like "Prompt: information_withholding_2025-10-24_04-25-40_ced2d7e1"
-                if line.startswith('Prompt:'):
-                    prompt_name = line.split(':', 1)[1].strip()
-                    prompt_names.add(prompt_name)
+        specific_file_paths = set()
 
-        # Filter files to only include those matching prompt names (base name before _seed_)
+        # Check if it's a YAML file (like high_awareness_bc_seeds_top3.yaml)
+        if prompt_list_path.suffix.lower() in ['.yaml', '.yml']:
+            with open(prompt_list_path) as f:
+                yaml_data = yaml.safe_load(f)
+
+            # Extract file paths from the YAML structure
+            if 'eval_awareness_buckets' in yaml_data:
+                for bucket_name, bucket_data in yaml_data['eval_awareness_buckets'].items():
+                    for prompt_id, prompt_info in bucket_data.items():
+                        if 'seeds' in prompt_info:
+                            for seed_info in prompt_info['seeds']:
+                                if 'file_path' in seed_info:
+                                    # Store the full file path
+                                    specific_file_paths.add(Path(seed_info['file_path']))
+
+        # Check if it's a CSV file
+        elif prompt_list_path.suffix.lower() == '.csv':
+            import csv
+            with open(prompt_list_path) as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # Get prompt_name from first column
+                    if 'prompt_name' in row:
+                        prompt_names.add(row['prompt_name'])
+                    else:
+                        # Fallback: use first column value
+                        first_col = next(iter(row.values()))
+                        if first_col:
+                            prompt_names.add(first_col)
+
+        # Otherwise assume text format
+        else:
+            with open(prompt_list_path) as f:
+                for line in f:
+                    line = line.strip()
+                    # Skip comments and empty lines
+                    if not line or line.startswith('#'):
+                        continue
+                    # Extract prompt name from lines like "Prompt: information_withholding_2025-10-24_04-25-40_ced2d7e1"
+                    if line.startswith('Prompt:'):
+                        prompt_name = line.split(':', 1)[1].strip()
+                        prompt_names.add(prompt_name)
+
+        # Filter files
         filtered_files = []
-        for file in rollout_files:
-            # Extract base name (before _seed_)
-            match = re.match(r'(.+)_seed_\d+\.yaml$', file.name)
-            if match:
-                base_name = match.group(1)
-                if base_name in prompt_names:
-                    filtered_files.append(file)
+
+        # If we have specific file paths from YAML, filter by exact match
+        if specific_file_paths:
+            # Extract exact (base_name, seed) combinations from YAML paths
+            yaml_combinations = set()
+            for spec_path in specific_file_paths:
+                spec_match = re.match(r'(.+)_seed_(\d+)\.yaml$', spec_path.name)
+                if spec_match:
+                    spec_base = spec_match.group(1)
+                    spec_seed = spec_match.group(2)
+                    yaml_combinations.add((spec_base, spec_seed))
+
+            if args.verbose:
+                print(f"  YAML contains {len(yaml_combinations)} specific (prompt, seed) combinations")
+
+            # Only keep rollout files that match exact (base_name, seed) from YAML
+            for rollout_file in rollout_files:
+                match = re.match(r'(.+)_seed_(\d+)\.yaml$', rollout_file.name)
+                if match:
+                    base_name = match.group(1)
+                    seed_num = match.group(2)
+                    if (base_name, seed_num) in yaml_combinations:
+                        filtered_files.append(rollout_file)
+
+        # Otherwise filter by prompt names (base name before _seed_)
+        elif prompt_names:
+            for file in rollout_files:
+                # Extract base name (before _seed_)
+                match = re.match(r'(.+)_seed_\d+\.yaml$', file.name)
+                if match:
+                    base_name = match.group(1)
+                    if base_name in prompt_names:
+                        filtered_files.append(file)
 
         print(f"Filtered {len(rollout_files)} files to {len(filtered_files)} files from prompt list")
         rollout_files = filtered_files
@@ -587,9 +803,12 @@ async def main():
     # Process files
     tasks = []
     for rollout_file in rollout_files:
-        # Preserve directory structure
+        # Preserve directory structure and add suppression seed to filename
         rel_path = rollout_file.relative_to(rollouts_dir)
-        output_file = output_dir / rel_path
+
+        # Modify filename to include suppression seed: deception_seed_0.yaml -> deception_seed_0_supp_0.yaml
+        output_filename = rollout_file.stem + f"_supp_{args.seed}" + rollout_file.suffix
+        output_file = output_dir / rel_path.parent / output_filename
 
         task = process_rollout(
             rollout_file=rollout_file,
@@ -602,8 +821,11 @@ async def main():
             temperature=args.temperature,
             semaphore=semaphore,
             judge_client=judge_client,
+            model_dir=args.model_dir,
             detection_mode=args.detection_mode,
             detection_threshold=detection_threshold,
+            removal_mode=args.removal_mode,
+            base_seed=args.seed,
             skip_existing=args.skip_existing,
             verbose=args.verbose
         )

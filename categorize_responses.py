@@ -146,6 +146,15 @@ async def main():
         print("Error: --force and --skip-existing cannot be used together")
         return 1
 
+    # Validate prompt-list contains model-dir name (safety check)
+    if args.prompt_list:
+        if args.model_dir not in args.prompt_list:
+            print(f"Error: Prompt list path must contain model directory name '{args.model_dir}'")
+            print(f"  Prompt list: {args.prompt_list}")
+            print(f"  Model dir: {args.model_dir}")
+            print(f"  This prevents accidentally using the wrong model's prompt list.")
+            return 1
+
     rollout_dir = config.ROLLOUTS_DIR / args.model_dir
     response_categorization_dir = config.RESPONSE_CATEGORIZATION_DIR / args.model_dir
 

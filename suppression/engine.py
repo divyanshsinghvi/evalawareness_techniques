@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Optional
 from dataclasses import dataclass, asdict
 import json
+import hashlib
 
 # Add parent directory for utils
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -19,6 +20,55 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import analyze_awareness_levels
 from suppression.openrouter_client import OpenRouterClient
 from score_awareness_with_llm import score_sentence, AsyncOpenAI
+
+
+class MaxResampleAttemptsExhausted(Exception):
+    """Raised when suppression fails to clean a chunk after max_resample_attempts."""
+    def __init__(self, chunk_index: int, max_attempts: int, aware_sentences: List[str]):
+        self.chunk_index = chunk_index
+        self.max_attempts = max_attempts
+        self.aware_sentences = aware_sentences
+        super().__init__(
+            f"Failed to clean chunk {chunk_index} after {max_attempts} resample attempts. "
+            f"Found {len(aware_sentences)} awareness-containing sentence(s). "
+            f"Consider increasing --max-resample-attempts."
+        )
+
+
+class MaxIterationsExhausted(Exception):
+    """Raised when suppression reaches max_iterations without completing response."""
+    def __init__(self, current_iteration: int, max_iterations: int, response_length: int):
+        self.current_iteration = current_iteration
+        self.max_iterations = max_iterations
+        self.response_length = response_length
+        super().__init__(
+            f"Reached max_iterations ({max_iterations}) without completing response. "
+            f"Generated {response_length} characters so far. "
+            f"Consider increasing --max-iterations."
+        )
+
+
+def generate_deterministic_seed(context: str, iteration: int, chunk_idx: int, resample_attempt: int, base_seed: int = 0) -> int:
+    """
+    Generate a deterministic seed based on context.
+
+    Args:
+        context: User message or file identifier for context
+        iteration: Current iteration number
+        chunk_idx: Current chunk index
+        resample_attempt: Current resample attempt number
+        base_seed: Base seed for multiple runs (like run number)
+
+    Returns:
+        Deterministic seed in range 0-999999
+    """
+    # Create unique string from all parameters including base_seed
+    seed_string = f"{base_seed}_{context}_{iteration}_{chunk_idx}_{resample_attempt}"
+    # Hash it
+    seed_hash = hashlib.sha256(seed_string.encode()).hexdigest()
+    # Convert first 8 hex chars to int and modulo to keep in reasonable range
+    seed = int(seed_hash[:8], 16) % 1000000
+    return seed
 
 
 @dataclass
@@ -116,6 +166,7 @@ async def generate_with_suppression(
     detection_mode: str = "rule_based",
     detection_judge_model: Optional[str] = None,
     detection_threshold: str = "any",  # For rule_based: "any" or "high"; for llm_sentence: int 1-10
+    base_seed: int = 0,  # Base seed for multiple runs (like run number)
     verbose: bool = False
 ) -> SuppressionResult:
     """
@@ -338,12 +389,21 @@ async def generate_with_suppression(
             prefill_reasoning=clean_reasoning
         )
 
+        # Generate deterministic seed for this iteration
+        generation_seed = generate_deterministic_seed(
+            context=user_message[:100],
+            iteration=resampling_iterations,
+            chunk_idx=0,  # Initial generation, no chunk yet
+            resample_attempt=0,  # Initial generation, not a resample
+            base_seed=base_seed
+        )
+
         if verbose:
             print(f"\n  📨 REQUEST MESSAGES:")
             print(json.dumps(current_messages, indent=2))
 
         # Generate continuation with adaptive token limit
-        response = await client.generate(current_messages, max_tokens=generation_max_tokens)
+        response = await client.generate(current_messages, max_tokens=generation_max_tokens, seed=generation_seed)
 
         if verbose:
             print(f"\n  📥 RESPONSE (ThinkingResponse):")
@@ -421,6 +481,15 @@ async def generate_with_suppression(
 
                             resampled_reasoning = False
                             for attempt in range(max_resample_attempts_per_chunk):
+                                # Generate deterministic seed based on context
+                                resample_seed = generate_deterministic_seed(
+                                    context=user_message[:100],  # Use first 100 chars of user message as context
+                                    iteration=resampling_iterations,
+                                    chunk_idx=r_chunk_idx,
+                                    resample_attempt=attempt,
+                                    base_seed=base_seed
+                                )
+
                                 # Regenerate reasoning continuation from clean prefix
                                 temp_clean_reasoning = ' '.join(clean_reasoning_chunks)
                                 regen_messages = client.format_messages_with_prefill(
@@ -429,7 +498,7 @@ async def generate_with_suppression(
                                     prefill_reasoning=temp_clean_reasoning
                                 )
 
-                                regen_response = await client.generate(regen_messages, max_tokens=generation_max_tokens)
+                                regen_response = await client.generate(regen_messages, max_tokens=generation_max_tokens, seed=resample_seed)
                                 regen_reasoning = regen_response.reasoning
 
                                 if regen_reasoning:
@@ -558,6 +627,15 @@ async def generate_with_suppression(
                 for attempt in range(max_resample_attempts_per_chunk):
                     attempts_used = attempt + 1
 
+                    # Generate deterministic seed based on context
+                    resample_seed = generate_deterministic_seed(
+                        context=user_message[:100],  # Use first 100 chars of user message as context
+                        iteration=resampling_iterations,
+                        chunk_idx=chunk_idx,
+                        resample_attempt=attempt,
+                        base_seed=base_seed
+                    )
+
                     if verbose:
                         print(f"        Attempt {attempt + 1}/{max_resample_attempts_per_chunk}...", end=" ")
 
@@ -568,7 +646,7 @@ async def generate_with_suppression(
                         prefill_reasoning=clean_reasoning
                     )
 
-                    regen_response = await client.generate(regen_messages, max_tokens=generation_max_tokens)
+                    regen_response = await client.generate(regen_messages, max_tokens=generation_max_tokens, seed=resample_seed)
                     regen_content = regen_response.content
 
                     if not regen_content:
@@ -618,7 +696,7 @@ async def generate_with_suppression(
                 if not resampled_successfully:
                     if verbose:
                         print(f"        ✗ Failed to clean after {max_resample_attempts_per_chunk} attempts")
-                    # Failed to clean this chunk - stop
+                    # Failed to clean this chunk - raise exception
                     chunk_resample_details.append(ChunkResampleInfo(
                         chunk_index=total_chunks_generated - 1,
                         original_chunk=original_chunk,
@@ -628,8 +706,14 @@ async def generate_with_suppression(
                     ))
 
                     if verbose:
-                        print(f"     ⚠️  Stopping suppression (could not clean chunk)")
-                    break
+                        print(f"     ⚠️  Max resample attempts exhausted - cannot continue")
+
+                    # Raise exception with details
+                    raise MaxResampleAttemptsExhausted(
+                        chunk_index=total_chunks_generated - 1,
+                        max_attempts=max_resample_attempts_per_chunk,
+                        aware_sentences=chunk_aware_sentences
+                    )
             else:
                 # Clean chunk! Add it to accumulated content
                 if verbose and not hit_aware_chunk:
@@ -677,6 +761,16 @@ async def generate_with_suppression(
         if not hit_aware_chunk:
             if verbose:
                 print(f"\n✓ Used all {chunks_added_this_generation} chunks from this generation")
+
+    # Check if we exhausted max_iterations without completing response
+    if resampling_iterations >= max_iterations and "\\boxed{" not in clean_content:
+        if verbose:
+            print(f"\n⚠️  Reached max_iterations ({max_iterations}) without completing response")
+        raise MaxIterationsExhausted(
+            current_iteration=resampling_iterations,
+            max_iterations=max_iterations,
+            response_length=len(clean_content)
+        )
 
     # Combine final response
     final_response = clean_content
