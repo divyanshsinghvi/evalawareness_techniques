@@ -226,7 +226,7 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
             response = await client.chat.completions.create(
                 model=judge_model,
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant. Respond directly with JSON array. Do not use extended reasoning or thinking tags."},
+                    {"role": "system", "content": SYSTEM_PROMPT_FOR_RESPONSE_JUDGE},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.0,
