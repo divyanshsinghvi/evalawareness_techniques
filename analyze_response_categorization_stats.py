@@ -641,8 +641,8 @@ def export_high_awareness_bc_seeds(data, model_dir: str):
         if not bc_and_aware_seeds:
             continue
 
-        # Sort by eval awareness (descending)
-        bc_and_aware_seeds.sort(key=lambda x: x['evaluation']['awareness_intensity'], reverse=True)
+        # Sort by eval awareness (descending), then by file_path (ascending) for deterministic ordering
+        bc_and_aware_seeds.sort(key=lambda x: (-x['evaluation']['awareness_intensity'], x['file_path']))
 
         # Remove behavioral_change flag from output (it's implicit since we filtered)
         for seed in bc_and_aware_seeds:
@@ -754,6 +754,156 @@ def export_high_awareness_bc_seeds(data, model_dir: str):
             print(f"{prompt_display:<50} {stats['eval_aware_pct']:>11.1f}% {stats['bc_rate']:>10.1%} {stats['bc_and_aware_count']:>10}")
 
 
+def analyze_awareness_type_by_score(data):
+    """Analyze breakdown of awareness types (self_test vs other_test vs no_test_reference) by score."""
+    print(f"\n{'='*80}")
+    print(f"AWARENESS TYPE BY SCORE")
+    print(f"{'='*80}\n")
+
+    # Track counts by score (0-10) and awareness type for both branches
+    eval_by_score = {}
+    deploy_by_score = {}
+
+    for score in range(11):
+        eval_by_score[score] = {'self_test': 0, 'other_test': 0, 'no_test_reference': 0}
+        deploy_by_score[score] = {'self_test': 0, 'other_test': 0, 'no_test_reference': 0}
+
+    for entry in data:
+        # Evaluation branch
+        eval_intensity = entry.get('evaluation', {}).get('awareness', {}).get('awareness_intensity', 0)
+        eval_type = entry.get('evaluation', {}).get('awareness', {}).get('awareness_type', 'unknown')
+
+        if eval_type in eval_by_score[eval_intensity]:
+            eval_by_score[eval_intensity][eval_type] += 1
+
+        # Deployment branch
+        deploy_intensity = entry.get('deployment', {}).get('awareness', {}).get('awareness_intensity', 0)
+        deploy_type = entry.get('deployment', {}).get('awareness', {}).get('awareness_type', 'unknown')
+
+        if deploy_type in deploy_by_score[deploy_intensity]:
+            deploy_by_score[deploy_intensity][deploy_type] += 1
+
+    # Print evaluation branch statistics
+    print("EVALUATION BRANCH:")
+    print(f"{'─'*80}")
+    print(f"\n{'Score':<7} {'self_test':>11} {'other_test':>11} {'no_test_ref':>11} {'Total':>11}")
+    print(f"{'─'*53}")
+
+    for score in range(11):
+        counts = eval_by_score[score]
+        total = sum(counts.values())
+        if total > 0:
+            print(f"{score:<7} {counts['self_test']:>11} {counts['other_test']:>11} {counts['no_test_reference']:>11} {total:>11}")
+
+    # Print totals
+    total_self = sum(eval_by_score[s]['self_test'] for s in range(11))
+    total_other = sum(eval_by_score[s]['other_test'] for s in range(11))
+    total_no_ref = sum(eval_by_score[s]['no_test_reference'] for s in range(11))
+    grand_total = total_self + total_other + total_no_ref
+
+    print(f"{'─'*53}")
+    print(f"{'TOTAL':<7} {total_self:>11} {total_other:>11} {total_no_ref:>11} {grand_total:>11}")
+
+    # Print deployment branch statistics
+    print(f"\n{'─'*80}")
+    print(f"\nDEPLOYMENT BRANCH:")
+    print(f"{'─'*80}")
+    print(f"\n{'Score':<7} {'self_test':>11} {'other_test':>11} {'no_test_ref':>11} {'Total':>11}")
+    print(f"{'─'*53}")
+
+    for score in range(11):
+        counts = deploy_by_score[score]
+        total = sum(counts.values())
+        if total > 0:
+            print(f"{score:<7} {counts['self_test']:>11} {counts['other_test']:>11} {counts['no_test_reference']:>11} {total:>11}")
+
+    # Print totals
+    total_self = sum(deploy_by_score[s]['self_test'] for s in range(11))
+    total_other = sum(deploy_by_score[s]['other_test'] for s in range(11))
+    total_no_ref = sum(deploy_by_score[s]['no_test_reference'] for s in range(11))
+    grand_total = total_self + total_other + total_no_ref
+
+    print(f"{'─'*53}")
+    print(f"{'TOTAL':<7} {total_self:>11} {total_other:>11} {total_no_ref:>11} {grand_total:>11}")
+    print()
+
+
+def export_top3_high_awareness_bc_seeds(model_dir: str):
+    """Load high_awareness_bc_seeds.yaml and create top-3 version with only top 3 eval awareness seeds per prompt."""
+
+    # Load the full high_awareness_bc_seeds.yaml file
+    input_file = Path('working/response_categorization') / model_dir / 'high_awareness_bc_seeds.yaml'
+
+    if not input_file.exists():
+        print(f"Warning: {input_file} not found, skipping top-3 export")
+        return
+
+    with open(input_file) as f:
+        full_data = yaml.safe_load(f)
+
+    # Create top-3 version
+    top3_data = {
+        'summary': full_data['summary'].copy(),
+        'eval_awareness_buckets': {}
+    }
+
+    # Update summary to reflect top-3 limitation
+    top3_data['summary']['seed_selection'] = 'Top 3 highest eval_awareness seeds per prompt (BC=true AND eval_awareness>4)'
+
+    total_seeds_top3 = 0
+
+    # Process each bucket
+    for bucket_name, prompts in full_data.get('eval_awareness_buckets', {}).items():
+        top3_data['eval_awareness_buckets'][bucket_name] = {}
+
+        for prompt_id, prompt_info in prompts.items():
+            # Get seeds (already sorted by eval awareness descending)
+            all_seeds = prompt_info['seeds']
+
+            # Re-sort to ensure deterministic ordering: by eval awareness (descending), then by file_path (ascending)
+            all_seeds_sorted = sorted(
+                all_seeds,
+                key=lambda x: (-x['evaluation']['awareness_intensity'], x['file_path'])
+            )
+
+            # Take top 3
+            top3_seeds = all_seeds_sorted[:3]
+            total_seeds_top3 += len(top3_seeds)
+
+            # Update statistics
+            new_stats = prompt_info['statistics'].copy()
+            new_stats['bc_and_aware_count'] = len(top3_seeds)
+            new_stats['note'] = f"Top 3 of {len(all_seeds)} BC+aware seeds"
+
+            # Create new prompt entry
+            top3_data['eval_awareness_buckets'][bucket_name][prompt_id] = {
+                'scenario': prompt_info['scenario'],
+                'category': prompt_info['category'],
+                'statistics': new_stats,
+                'seeds': top3_seeds
+            }
+
+    # Update summary with top-3 counts
+    top3_data['summary']['total_bc_aware_seeds_included'] = total_seeds_top3
+
+    # Write output YAML
+    output_file = Path('working/response_categorization') / model_dir / 'high_awareness_bc_seeds_top3.yaml'
+
+    with open(output_file, 'w') as f:
+        yaml.dump(top3_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    # Print summary
+    original_total = full_data['summary']['total_bc_aware_seeds_included']
+    print(f"\n{'='*80}")
+    print(f"TOP-3 HIGH AWARENESS BC SEEDS EXPORT")
+    print(f"{'='*80}\n")
+    print(f"Filtered from: {original_total} seeds")
+    print(f"Top-3 version: {total_seeds_top3} seeds")
+    print(f"Reduction: {original_total - total_seeds_top3} seeds ({((original_total - total_seeds_top3) / original_total * 100):.1f}%)")
+    print(f"\nOutput: {output_file}")
+    print(f"{'='*80}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Analyze response categorization statistics')
     parser.add_argument('--model-dir', type=str, required=True,
@@ -783,12 +933,16 @@ def main():
     analyze_self_test_prompts(data)
     analyze_awareness_threshold_prompts(data)
     analyze_mean_per_prompt(data)
+    analyze_awareness_type_by_score(data)
 
     # Export per-prompt CSV
     export_per_prompt_csv(data, args.model_dir)
 
     # Export high-awareness BC seeds
     export_high_awareness_bc_seeds(data, args.model_dir)
+
+    # Export top-3 version
+    export_top3_high_awareness_bc_seeds(args.model_dir)
 
     print(f"\n{'='*80}")
     print(f"ANALYSIS COMPLETE")

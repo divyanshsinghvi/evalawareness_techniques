@@ -190,16 +190,33 @@ async def main():
 
         # Parse prompt names from the file
         prompt_names = set()
-        with open(prompt_list_path) as f:
-            for line in f:
-                line = line.strip()
-                # Skip comments and empty lines
-                if not line or line.startswith('#'):
-                    continue
-                # Extract prompt name from lines like "Prompt: information_withholding_2025-10-24_04-25-40_ced2d7e1"
-                if line.startswith('Prompt:'):
-                    prompt_name = line.split(':', 1)[1].strip()
-                    prompt_names.add(prompt_name)
+
+        # Check if it's a CSV file
+        if prompt_list_path.suffix.lower() == '.csv':
+            import csv
+            with open(prompt_list_path) as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # Get prompt_name from first column
+                    if 'prompt_name' in row:
+                        prompt_names.add(row['prompt_name'])
+                    else:
+                        # Fallback: use first column value
+                        first_col = next(iter(row.values()))
+                        if first_col:
+                            prompt_names.add(first_col)
+        else:
+            # Text format
+            with open(prompt_list_path) as f:
+                for line in f:
+                    line = line.strip()
+                    # Skip comments and empty lines
+                    if not line or line.startswith('#'):
+                        continue
+                    # Extract prompt name from lines like "Prompt: information_withholding_2025-10-24_04-25-40_ced2d7e1"
+                    if line.startswith('Prompt:'):
+                        prompt_name = line.split(':', 1)[1].strip()
+                        prompt_names.add(prompt_name)
 
         # Filter files to only include those matching prompt names (base name before _seed_)
         filtered_files = []
