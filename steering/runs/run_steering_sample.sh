@@ -46,7 +46,15 @@ MAX_NEW_TOKENS=3000
 TEMPERATURE=0.7
 TOP_P=0.95
 DTYPE="bfloat16"
-SEED=42
+
+# Seed(s) - can be single or multiple
+SEEDS=(42)
+
+# Multiple seeds for robustness (uncomment to use)
+# SEEDS=(42 43 44 45 46)
+
+# Many seeds for statistical analysis (uncomment to use)
+# SEEDS=($(seq 1 10))  # Seeds 1 through 10
 
 # Steering parameters
 LAYER_RANGE=(16 32)  # First and last layer to consider
@@ -71,7 +79,16 @@ if [ ! -d "$STEERING_VEC_DIR" ]; then
     mkdir -p "$STEERING_VEC_DIR"
 fi
 
-echo "Output will be saved to: $FULL_OUTPUT_DIR/N{n}_S{s}/"
+echo "Configuration:"
+echo "  Model: $MODEL"
+echo "  Mode: $MODE"
+echo "  Priority: $PRIORITY"
+echo "  Vec type: $VEC_TYPE"
+echo "  Seeds: ${SEEDS[@]} (${#SEEDS[@]} seed(s))"
+echo "  Num layers: ${NUM_LAYERS[@]}"
+echo "  Strengths: ${STRENGTH[@]}"
+echo "  Output: $FULL_OUTPUT_DIR/N{n}_S{s}/"
+echo ""
 
 # Build the base command
 python3 evalawareness_techniques/steering/steer_model.py \
@@ -84,7 +101,7 @@ python3 evalawareness_techniques/steering/steer_model.py \
   --out_dir "$BASE_OUTPUT_DIR" \
   --prompts_dir "$BASE_PROMPTS_DIR" \
   --dtype "$DTYPE" \
-  --seed $SEED \
+  --seed ${SEEDS[@]} \
   --batch_size $BATCH_SIZE \
   --max_new_tokens $MAX_NEW_TOKENS \
   --temperature $TEMPERATURE \
