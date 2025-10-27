@@ -210,7 +210,15 @@ def analyze_cues_by_score(categorization_dir: Path, model_dir: str):
             'seed_count': 0,
             'cue_counts': defaultdict(int),
             'specific_cues': defaultdict(list),
+            'awareness_types': defaultdict(int),  # Track self_test vs other_test vs no_test_reference
         }
+
+    # Track cues by awareness type (for separate analysis)
+    awareness_type_stats = {
+        'self_test': {'seed_count': 0, 'cue_counts': defaultdict(int), 'specific_cues': defaultdict(list)},
+        'other_test': {'seed_count': 0, 'cue_counts': defaultdict(int), 'specific_cues': defaultdict(list)},
+        'no_test_reference': {'seed_count': 0, 'cue_counts': defaultdict(int), 'specific_cues': defaultdict(list)}
+    }
 
     # Find all categorized rollout YAML files
     pattern = str(categorization_dir / '**/*.yaml')
@@ -231,8 +239,11 @@ def analyze_cues_by_score(categorization_dir: Path, model_dir: str):
         if not cat_data:
             continue
 
-        # Get evaluation awareness score
-        eval_score = cat_data.get('evaluation', {}).get('awareness', {}).get('awareness_intensity', None)
+        # Get evaluation awareness score and type
+        eval_awareness = cat_data.get('evaluation', {}).get('awareness', {})
+        eval_score = eval_awareness.get('awareness_intensity', None)
+        awareness_type = eval_awareness.get('awareness_type', 'unknown')
+
         if eval_score is None:
             continue
 
@@ -263,11 +274,20 @@ def analyze_cues_by_score(categorization_dir: Path, model_dir: str):
 
         # Add to score bucket stats
         score_stats[score_bucket]['seed_count'] += 1
+        score_stats[score_bucket]['awareness_types'][awareness_type] += 1
 
         for category, cue_list in cues.items():
             if cue_list:
                 score_stats[score_bucket]['cue_counts'][category] += len(cue_list)
                 score_stats[score_bucket]['specific_cues'][category].extend(cue_list)
+
+        # Also add to awareness type stats
+        if awareness_type in awareness_type_stats:
+            awareness_type_stats[awareness_type]['seed_count'] += 1
+            for category, cue_list in cues.items():
+                if cue_list:
+                    awareness_type_stats[awareness_type]['cue_counts'][category] += len(cue_list)
+                    awareness_type_stats[awareness_type]['specific_cues'][category].extend(cue_list)
 
         processed += 1
         if processed % 100 == 0:
@@ -275,10 +295,10 @@ def analyze_cues_by_score(categorization_dir: Path, model_dir: str):
 
     print(f"Processed {processed} categorized rollouts total")
 
-    return score_stats
+    return score_stats, awareness_type_stats
 
 
-def print_analysis_report(score_stats):
+def print_analysis_report(score_stats, awareness_type_stats):
     """Print comprehensive analysis report."""
 
     print(f"\n{'='*80}")
@@ -297,6 +317,73 @@ def print_analysis_report(score_stats):
         print(f"{score_bucket:<12} {stats['seed_count']:>10} {avg_cues:>15.2f}")
 
     print(f"{'─'*80}\n")
+
+    # Awareness type distribution
+    print("AWARENESS TYPE DISTRIBUTION BY SCORE:")
+    print(f"{'─'*80}")
+    print(f"{'Score':<12} {'self_test':>12} {'other_test':>12} {'no_test_ref':>12}")
+    print(f"{'─'*80}")
+
+    for score_bucket in ['0-2', '3-4', '5-6', '7-8', '9-10']:
+        stats = score_stats[score_bucket]
+        self_test = stats['awareness_types'].get('self_test', 0)
+        other_test = stats['awareness_types'].get('other_test', 0)
+        no_test = stats['awareness_types'].get('no_test_reference', 0)
+
+        total = stats['seed_count']
+        self_pct = (self_test / total * 100) if total > 0 else 0
+        other_pct = (other_test / total * 100) if total > 0 else 0
+        no_pct = (no_test / total * 100) if total > 0 else 0
+
+        print(f"{score_bucket:<12} {self_test:>6}({self_pct:>4.1f}%) {other_test:>6}({other_pct:>4.1f}%) {no_test:>6}({no_pct:>4.1f}%)")
+
+    print(f"{'─'*80}\n")
+
+    # Cue comparison by awareness type
+    print("\nCUE COMPARISON: SELF_TEST vs OTHER_TEST (avg per seed):")
+    print(f"{'─'*80}")
+    print(f"{'Category':<20} {'self_test':>12} {'other_test':>12} {'Difference':>12} {'% Increase':>12}")
+    print(f"{'─'*80}")
+
+    categories = ['file_names', 'urls_paths', 'debug_technical', 'metadata',
+                  'authority_markers', 'email_references', 'git_references', 'timestamps']
+
+    for category in categories:
+        self_count = awareness_type_stats['self_test']['seed_count']
+        other_count = awareness_type_stats['other_test']['seed_count']
+
+        self_avg = (awareness_type_stats['self_test']['cue_counts'][category] / self_count) if self_count > 0 else 0
+        other_avg = (awareness_type_stats['other_test']['cue_counts'][category] / other_count) if other_count > 0 else 0
+
+        diff = other_avg - self_avg
+        pct_change = ((other_avg - self_avg) / self_avg * 100) if self_avg > 0 else 0
+
+        print(f"{category:<20} {self_avg:>12.4f} {other_avg:>12.4f} {diff:>12.4f} {pct_change:>11.1f}%")
+
+    print(f"{'─'*80}")
+    print(f"{'Total seeds':<20} {self_count:>12} {other_count:>12}")
+    print(f"{'─'*80}\n")
+
+    # Most common specific cues for other_test
+    print("\nMOST COMMON CUES IN OTHER_TEST (Top 20 - likely causing confusion):")
+    print(f"{'─'*80}\n")
+
+    other_stats = awareness_type_stats['other_test']
+    cue_freq = defaultdict(int)
+    for cat, cues in other_stats['specific_cues'].items():
+        for cue in cues:
+            cue_freq[(cat, cue)] += 1
+
+    top_other_cues = sorted(cue_freq.items(), key=lambda x: -x[1])[:20]
+
+    if top_other_cues:
+        for (cat, cue), count in top_other_cues:
+            avg_per_seed = count / other_stats['seed_count'] if other_stats['seed_count'] > 0 else 0
+            print(f"  [{cat:>18}] {cue[:50]:<50} ({count} = {avg_per_seed:.4f}/seed)")
+    else:
+        print("  (No other_test cues found)")
+
+    print(f"\n{'─'*80}\n")
 
     # Cue category distribution
     print("\nCUE CATEGORY DISTRIBUTION BY SCORE (avg occurrences per seed):")
@@ -407,10 +494,10 @@ def main():
         return 1
 
     # Analyze cues
-    score_stats = analyze_cues_by_score(categorization_dir, args.model_dir)
+    score_stats, awareness_type_stats = analyze_cues_by_score(categorization_dir, args.model_dir)
 
     # Print report
-    print_analysis_report(score_stats)
+    print_analysis_report(score_stats, awareness_type_stats)
 
     # Save results
     output_file = categorization_dir / 'cue_analysis_by_score.yaml'
