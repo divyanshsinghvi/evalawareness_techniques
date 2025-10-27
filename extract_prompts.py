@@ -102,14 +102,17 @@ def load_high_awareness_files(resp_cat_dir: Path, model_name: str, extracted_pro
     return files_list
 
 
-def extract_prompts_from_file(yaml_file):
+def extract_prompts_from_file(yaml_file, extracted_prompts_dir: Path):
     """Extract system_prompt, evaluser, deployuser, and checksum from a YAML file."""
     with open(yaml_file, 'r') as f:
         data = yaml.safe_load(f)
     
     system_prompt = data.get('system_prompt', '')
     checksum = data.get('source_checksum_sha256', '')
-    source_file_name = data.get('source_file', '')
+    
+    # The source_file is the YAML file itself (not the transcript it references)
+    # Format: category/filename.yaml relative to extracted_prompts_dir
+    source_file_name = yaml_file.relative_to(extracted_prompts_dir).as_posix()
     
     # Extract deploy user message (branch_a_deployment) with None check
     deploy_user = ''
@@ -175,7 +178,7 @@ def process_model(model_name: str, resp_cat_dir: Path, extracted_prompts_dir: Pa
                 errors.append((str(source_file), "File not found"))
                 continue
             
-            prompts = extract_prompts_from_file(source_file)
+            prompts = extract_prompts_from_file(source_file, extracted_prompts_dir)
             
             # Get metadata for output: source_file_name, bucket, checksum, prompt
             base_metadata = {

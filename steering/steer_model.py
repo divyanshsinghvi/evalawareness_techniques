@@ -480,7 +480,8 @@ def steer_and_generate(
                     bucket = batch_bucket_list[i] if batch_bucket_list else 'unknown'
                     
                     # Create output filename based on source file with seed
-                    base_name = os.path.splitext(source_file)[0]
+                    base_name = os.path.splitext(os.path.basename(source_file))[0]
+                    # base_name = os.path.splitext(source_file)[0]
                     out_filename = f"{base_name}_seed_{seed}_steer_out.yaml"
                     out_path = os.path.join(resdir, out_filename)
                     
