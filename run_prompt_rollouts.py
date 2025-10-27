@@ -235,7 +235,7 @@ class PromptRollout:
                 if "qwen3-235b-a22b-thinking" in self.model.lower():
                     extra_body["provider"] = {
                         "order": ["SiliconFlow"],
-                        "allow_fallbacks": False
+                        "allow_fallbacks": True
                     }
 
                 api_kwargs["extra_body"] = extra_body
