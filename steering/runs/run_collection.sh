@@ -6,7 +6,7 @@ set -euo pipefail  # Exit on error, undefined vars, and pipe failures
 
 # Get the script directory and project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Change to project root for consistent paths
 cd "$PROJECT_ROOT"
@@ -18,15 +18,15 @@ echo "Project root: $PROJECT_ROOT"
 echo ""
 
 # Configuration
-MODEL="/pscratch/sd/r/ritesh11/temp/Qwen3-30B-A3B"
-DATASET="prompts"
+MODEL="/pscratch/sd/r/ritesh11/temp/models/Qwen3-32B"
+DATASET="/pscratch/sd/r/ritesh11/temp/working/contrastive-prompts/tim-prompts"
 DATASET_SPLIT="eval"
 TEXT_COLUMN="text"
-ACTIVATION_STORE_DIR="model_activations"
+ACTIVATION_STORE_DIR="/pscratch/sd/r/ritesh11/temp/steering_experiments/qwen3-32B/qwen32-tim-modelacts"
 
 # Layer selection - choose one or define custom
 # Single layer
-LAYERS=(22)
+# LAYERS=(22)
 
 # Multiple specific layers (uncomment to use)
 # LAYERS=(10 15 20 25 30)
@@ -35,7 +35,7 @@ LAYERS=(22)
 # LAYERS=($(seq 10 5 30))  # Layers 10, 15, 20, 25, 30
 
 # All middle layers (uncomment to use)
-# LAYERS=($(seq 10 40))  # Layers 10 through 40
+LAYERS=($(seq 5 21))  # Layers 10 through 40
 
 # First, middle, and last layers for a 48-layer model (uncomment to use)
 # LAYERS=(0 12 24 36 47)
@@ -61,7 +61,7 @@ echo "  Output: $ACTIVATION_STORE_DIR"
 echo ""
 
 # Execute the collection script
-python3 evalawareness_techniques/steering/collect_activations.py \
+python collect_activations.py \
   --model "$MODEL" \
   --dataset "$DATASET" \
   --dataset-split "$DATASET_SPLIT" \

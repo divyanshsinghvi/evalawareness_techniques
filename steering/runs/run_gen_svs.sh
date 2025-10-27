@@ -6,7 +6,7 @@ set -euo pipefail  # Exit on error, undefined vars, and pipe failures
 
 # Get the script directory and project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Change to project root for consistent paths
 cd "$PROJECT_ROOT"
@@ -19,15 +19,15 @@ echo ""
 
 # Configuration
 MODEL_NAME="qwen_qwen3-32b"
-EVAL_DIR="model_activations/eval"
-DEPLOY_DIR="model_activations/deploy"
-BASE_OUTPUT_DIR="steering_vectors"
-CATEGORY="tim"  # or "anthropic"
+EVAL_DIR="/pscratch/sd/r/ritesh11/temp/steering_experiments/qwen3-32B/qwen32-anthropic-modelacts/eval"
+DEPLOY_DIR="/pscratch/sd/r/ritesh11/temp/steering_experiments/qwen3-32B/qwen32-anthropic-modelacts/deploy"
+BASE_OUTPUT_DIR="/pscratch/sd/r/ritesh11/temp/working/steering-vecs"
+CATEGORY="anthropic"  # or "anthropic"
 
 # Layer range - choose one or define custom
 # Specific range
-START_LAYER=15
-END_LAYER=48
+START_LAYER=5
+END_LAYER=21
 
 # Alternative: Middle layers only (uncomment to use)
 # START_LAYER=20
@@ -67,7 +67,7 @@ if [ ! -d "$DEPLOY_DIR" ]; then
 fi
 
 # Execute the generation script
-python3 evalawareness_techniques/steering/generate_simple_svs.py \
+python generate_simple_svs.py \
   --model_name "$MODEL_NAME" \
   --eval_dir "$EVAL_DIR" \
   --deploy_dir "$DEPLOY_DIR" \
