@@ -28,7 +28,7 @@ class OffPolicyIntervention:
     """Apply prefill/postfill interventions to existing rollouts."""
 
     def __init__(self, model: str = "qwen/qwen3-32b",
-                 api_key: str = None, temperature: float = 0.6, 
+                 api_key: str = None, temperature: float = 0.7, 
                  max_tokens: int = 28000, provider: str = None,
                  concurrency: int = 5, verbose: bool = False):
         self.model = model
@@ -47,7 +47,6 @@ class OffPolicyIntervention:
             max_tokens=max_tokens,
             provider=provider,
             verbose=verbose,
-            top_p=0.95
         )
         
         # Get thinking tags from client (model default)

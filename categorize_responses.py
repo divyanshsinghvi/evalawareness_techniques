@@ -21,6 +21,7 @@ import os
 import re
 import hashlib
 import traceback
+import config
 
 # Import from score_awareness_with_llm.py
 from score_awareness_with_llm import score_response, AsyncOpenAI
@@ -117,8 +118,8 @@ async def main():
     parser = argparse.ArgumentParser(description='Categorize rollout responses (holistic scoring)')
     parser.add_argument('--model-dir', type=str, required=True,
                        help='Model directory (e.g., qwen_qwen3-32b)')
-    parser.add_argument('--judge-model', default='qwen/qwen3-32b',
-                       help='Judge model (default: qwen/qwen3-32b)')
+    parser.add_argument('--judge-model', default=config.DEFAULT_JUDGE_MODEL,
+                       help=f'Judge model (default: {config.DEFAULT_JUDGE_MODEL})')
     parser.add_argument('--concurrency', type=int, default=10,
                        help='Parallel file processing (default: 10)')
     parser.add_argument('--limit', type=int, default=None,
@@ -145,13 +146,8 @@ async def main():
         print("Error: --force and --skip-existing cannot be used together")
         return 1
 
-    # Validate judge model
-    if "qwen3-32b" not in args.judge_model.lower():
-        print(f"Error: Judge model must be qwen3-32b, got: {args.judge_model}")
-        return 1
-
-    rollout_dir = Path('working/rollouts') / args.model_dir
-    response_categorization_dir = Path('working/response_categorization') / args.model_dir
+    rollout_dir = config.ROLLOUTS_DIR / args.model_dir
+    response_categorization_dir = config.RESPONSE_CATEGORIZATION_DIR / args.model_dir
 
     if not rollout_dir.exists():
         print(f"Error: {rollout_dir} not found")
@@ -173,7 +169,7 @@ async def main():
         return 1
 
     client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
+        base_url=config.OPENROUTER_BASE_URL,
         api_key=api_key
     )
 

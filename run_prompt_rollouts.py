@@ -110,6 +110,7 @@ from collections import defaultdict
 import re
 import numpy as np
 from scipy import stats
+import config
 
 load_dotenv()
 
@@ -161,15 +162,16 @@ def validate_no_thinking_tags(response: str) -> Dict:
 class PromptRollout:
     """Run extracted prompts through models (async)."""
 
-    def __init__(self, model: str = "qwen/qwen3-32b", concurrency: int = 5,
-                 base_url: str = None, api_key: str = None, request_delay: float = 1):
-        self.model = model
+    def __init__(self, model: str = None, concurrency: int = None,
+                 base_url: str = None, api_key: str = None, request_delay: float = None):
+        self.model = model or config.DEFAULT_MODEL
+        concurrency = concurrency or config.DEFAULT_CONCURRENCY
         self.semaphore = asyncio.Semaphore(concurrency)
-        self.request_delay = request_delay  # Delay in seconds between requests
+        self.request_delay = request_delay if request_delay is not None else config.DEFAULT_REQUEST_DELAY
 
         # Default to OpenRouter if no base_url provided
         if base_url is None:
-            base_url = "https://openrouter.ai/api/v1"
+            base_url = config.OPENROUTER_BASE_URL
             api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         else:
             # For Ollama or other local servers, use dummy key if none provided
@@ -215,13 +217,13 @@ class PromptRollout:
             async with self.semaphore:
                 # Build kwargs for API call
                 api_kwargs = {
-                        "model": self.model,
+                    "model": self.model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": formatted_prompt}
                     ],
-                    "temperature": 0.7,
-                    "max_tokens": 28000,
+                    "temperature": config.ROLLOUT_TEMPERATURE,
+                    "max_tokens": config.ROLLOUT_MAX_TOKENS,
                     "seed": seed,
                 }
 
@@ -569,8 +571,8 @@ class PromptRollout:
 
         Structure: working/rollouts/{model_name}/{same_directory_structure}/{filename}_seed_{i}.yaml
         """
-        # Extract relative path from working/extracted_prompts/
-        base_dir = Path('working/extracted_prompts')
+        # Extract relative path from extracted_prompts/
+        base_dir = config.EXTRACTED_PROMPTS_DIR
         try:
             relative_path = source_file.relative_to(base_dir)
         except ValueError:
@@ -586,8 +588,8 @@ class PromptRollout:
         # Create model directory name (replace / with _)
         model_safe = self.model.replace('/', '_')
 
-        # Build output path: working/rollouts/{model_name}/{category}/{filename}_seed_{i}.yaml
-        output_dir = Path('working/rollouts') / model_safe / category_path
+        # Build output path: rollouts/{model_name}/{category}/{filename}_seed_{i}.yaml
+        output_dir = config.ROLLOUTS_DIR / model_safe / category_path
         output_dir.mkdir(parents=True, exist_ok=True)
 
         filename = f"{filename_stem}_seed_{seed}.yaml"
@@ -813,7 +815,7 @@ def find_prompt_files(category: Optional[str] = None, input_files: Optional[List
     if input_files:
         return [Path(f) for f in input_files if Path(f).exists()]
 
-    base_dir = Path('working/extracted_prompts')
+    base_dir = config.EXTRACTED_PROMPTS_DIR
 
     if not base_dir.exists():
         print(f"Error: {base_dir} not found!")
@@ -1023,7 +1025,7 @@ async def process_single_disable_cot_rollout(runner: PromptRollout, filepath: Pa
 
     # Save to disable_cot experiment directory
     base_dir = Path('working/01_disable_cot_experiment/results')
-    relative_path = filepath.relative_to(Path('working/extracted_prompts'))
+    relative_path = filepath.relative_to(config.EXTRACTED_PROMPTS_DIR)
     category_path = relative_path.parent
 
     model_safe = runner.model.replace('/', '_')
@@ -1090,7 +1092,7 @@ async def run_disable_cot_experiment_async(
     print()
 
     # Select test prompts from ideal behavioral change category
-    source_dir = Path('working/extracted_prompts/behavioral_change/ideal')
+    source_dir = config.EXTRACTED_PROMPTS_DIR / 'behavioral_change/ideal'
     if not source_dir.exists():
         print(f"Error: {source_dir} not found!")
         return
@@ -1121,7 +1123,7 @@ async def run_disable_cot_experiment_async(
 
             # Check if output already exists
             base_dir = Path('working/01_disable_cot_experiment/results')
-            relative_path = filepath.relative_to(Path('working/extracted_prompts'))
+            relative_path = filepath.relative_to(config.EXTRACTED_PROMPTS_DIR)
             category_path = relative_path.parent
             output_dir = base_dir / model_safe / category_path
             filename = f"{filepath.stem}_seed_{seed}.yaml"
@@ -1305,43 +1307,43 @@ Experiments:
     )
     parser.add_argument('--experiment', choices=['disable_cot'],
                        help='Run a specific experiment instead of normal rollouts')
-    parser.add_argument('--model', default='qwen/qwen3-32b',
-                       help='Model to use for rollouts')
+    parser.add_argument('--model', default=config.DEFAULT_MODEL,
+                       help=f'Model to use for rollouts (default: {config.DEFAULT_MODEL})')
     parser.add_argument('--category', default='behavioral_change',
                        help='Filter by category (default: behavioral_change). Examples: behavioral_change, behavioral_change/ideal, behavioral_change/baseline_suspicious, no_behavioral_change, incomplete, or "all" for everything')
     parser.add_argument('--input', nargs='+', help='Specific YAML files to process')
     parser.add_argument('--limit', type=int, help='Limit number of prompts to process')
-    parser.add_argument('--concurrency', type=int, default=5,
-                       help='Number of concurrent requests (default: 5)')
+    parser.add_argument('--concurrency', type=int, default=config.DEFAULT_CONCURRENCY,
+                       help=f'Number of concurrent requests (default: {config.DEFAULT_CONCURRENCY})')
     parser.add_argument('--rollouts-per-prompt', type=int, default=1,
                        help='Number of rollouts per prompt with different seeds (default: 1, set to 100 for full evaluation)')
-    parser.add_argument('--seed', type=int, default=0,
-                       help='Starting seed value (increments for each rollout, default: 0)')
+    parser.add_argument('--seed', type=int, default=config.ROLLOUT_SEED_START,
+                       help=f'Starting seed value (increments for each rollout, default: {config.ROLLOUT_SEED_START})')
     parser.add_argument('--base-url',
-                       help='Base URL for API (default: OpenRouter, use http://localhost:11434/v1 for Ollama)')
+                       help=f'Base URL for API (default: {config.OPENROUTER_BASE_URL}, use http://localhost:11434/v1 for Ollama)')
     parser.add_argument('--api-key',
                        help='API key (default: OPENROUTER_API_KEY env var, or "ollama" for local)')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Show detailed output for each file/seed (default: show progress bar only)')
     parser.add_argument('--include-incomplete', action='store_true',
                        help='Include files from incomplete directory (default: skip incomplete)')
-    parser.add_argument('--request-delay', type=float, default=1,
-                       help='Delay in seconds between API requests to avoid rate limiting (default: 1, use 60 for 1 minute)')
+    parser.add_argument('--request-delay', type=float, default=config.DEFAULT_REQUEST_DELAY,
+                       help=f'Delay in seconds between API requests to avoid rate limiting (default: {config.DEFAULT_REQUEST_DELAY}, use 60 for 1 minute)')
     parser.add_argument('--prompt-list', type=str,
                        help='Path to file containing prompt names to filter (e.g., high_awareness_high_change_prompts.txt)')
     parser.add_argument('--sample-by-interestingness', choices=['eval-awareness', 'bc-rate', 'delta', 'composite'],
                        help='Sample prompts based on interestingness probability distribution. Options: eval-awareness (evaluation awareness scores), bc-rate (behavioral change rate), delta (eval-deploy awareness difference), composite (statistical CI * BC rate * obviousness penalty)')
     parser.add_argument('--sample-categorization-dir', type=str,
                        help='Path to response_categorization directory (e.g., working/response_categorization/qwen_qwen3-32b). Required when using --sample-by-interestingness')
-    parser.add_argument('--sample-temperature', type=float, default=1.0,
-                       help='Temperature for softmax sampling (default: 1.0, lower=more focused on high scores, higher=more uniform)')
+    parser.add_argument('--sample-temperature', type=float, default=config.DEFAULT_SAMPLE_TEMPERATURE,
+                       help=f'Temperature for softmax sampling (default: {config.DEFAULT_SAMPLE_TEMPERATURE}, lower=more focused on high scores, higher=more uniform)')
 
     args = parser.parse_args()
 
     # Route to experiment if specified
     if args.experiment == 'disable_cot':
         # Use qwen3-235b-a22b-thinking-2507 as default for experiments if not specified
-        if args.model == 'qwen/qwen3-32b':  # Check if using default model
+        if args.model == config.DEFAULT_MODEL:  # Check if using default model
             model = 'qwen/qwen3-235b-a22b-thinking-2507'
         else:
             model = args.model

@@ -108,7 +108,7 @@ async def generate_with_suppression(
     initial_content: str = "",
     max_iterations: int = 10,
     max_resample_attempts_per_chunk: int = 3,
-    temperature: float = 1.0,
+    temperature: float = 0.7,
     max_tokens: int = 1000,
     adaptive_tokens: bool = True,
     base_tokens: int = 100,
