@@ -641,8 +641,8 @@ def export_high_awareness_bc_seeds(data, model_dir: str):
         if not bc_and_aware_seeds:
             continue
 
-        # Sort by eval awareness (descending)
-        bc_and_aware_seeds.sort(key=lambda x: x['evaluation']['awareness_intensity'], reverse=True)
+        # Sort by eval awareness (descending), then by file_path (ascending) for deterministic ordering
+        bc_and_aware_seeds.sort(key=lambda x: (-x['evaluation']['awareness_intensity'], x['file_path']))
 
         # Remove behavioral_change flag from output (it's implicit since we filtered)
         for seed in bc_and_aware_seeds:
@@ -828,6 +828,82 @@ def analyze_awareness_type_by_score(data):
     print()
 
 
+def export_top3_high_awareness_bc_seeds(model_dir: str):
+    """Load high_awareness_bc_seeds.yaml and create top-3 version with only top 3 eval awareness seeds per prompt."""
+
+    # Load the full high_awareness_bc_seeds.yaml file
+    input_file = Path('working/response_categorization') / model_dir / 'high_awareness_bc_seeds.yaml'
+
+    if not input_file.exists():
+        print(f"Warning: {input_file} not found, skipping top-3 export")
+        return
+
+    with open(input_file) as f:
+        full_data = yaml.safe_load(f)
+
+    # Create top-3 version
+    top3_data = {
+        'summary': full_data['summary'].copy(),
+        'eval_awareness_buckets': {}
+    }
+
+    # Update summary to reflect top-3 limitation
+    top3_data['summary']['seed_selection'] = 'Top 3 highest eval_awareness seeds per prompt (BC=true AND eval_awareness>4)'
+
+    total_seeds_top3 = 0
+
+    # Process each bucket
+    for bucket_name, prompts in full_data.get('eval_awareness_buckets', {}).items():
+        top3_data['eval_awareness_buckets'][bucket_name] = {}
+
+        for prompt_id, prompt_info in prompts.items():
+            # Get seeds (already sorted by eval awareness descending)
+            all_seeds = prompt_info['seeds']
+
+            # Re-sort to ensure deterministic ordering: by eval awareness (descending), then by file_path (ascending)
+            all_seeds_sorted = sorted(
+                all_seeds,
+                key=lambda x: (-x['evaluation']['awareness_intensity'], x['file_path'])
+            )
+
+            # Take top 3
+            top3_seeds = all_seeds_sorted[:3]
+            total_seeds_top3 += len(top3_seeds)
+
+            # Update statistics
+            new_stats = prompt_info['statistics'].copy()
+            new_stats['bc_and_aware_count'] = len(top3_seeds)
+            new_stats['note'] = f"Top 3 of {len(all_seeds)} BC+aware seeds"
+
+            # Create new prompt entry
+            top3_data['eval_awareness_buckets'][bucket_name][prompt_id] = {
+                'scenario': prompt_info['scenario'],
+                'category': prompt_info['category'],
+                'statistics': new_stats,
+                'seeds': top3_seeds
+            }
+
+    # Update summary with top-3 counts
+    top3_data['summary']['total_bc_aware_seeds_included'] = total_seeds_top3
+
+    # Write output YAML
+    output_file = Path('working/response_categorization') / model_dir / 'high_awareness_bc_seeds_top3.yaml'
+
+    with open(output_file, 'w') as f:
+        yaml.dump(top3_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    # Print summary
+    original_total = full_data['summary']['total_bc_aware_seeds_included']
+    print(f"\n{'='*80}")
+    print(f"TOP-3 HIGH AWARENESS BC SEEDS EXPORT")
+    print(f"{'='*80}\n")
+    print(f"Filtered from: {original_total} seeds")
+    print(f"Top-3 version: {total_seeds_top3} seeds")
+    print(f"Reduction: {original_total - total_seeds_top3} seeds ({((original_total - total_seeds_top3) / original_total * 100):.1f}%)")
+    print(f"\nOutput: {output_file}")
+    print(f"{'='*80}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Analyze response categorization statistics')
     parser.add_argument('--model-dir', type=str, required=True,
@@ -864,6 +940,9 @@ def main():
 
     # Export high-awareness BC seeds
     export_high_awareness_bc_seeds(data, args.model_dir)
+
+    # Export top-3 version
+    export_top3_high_awareness_bc_seeds(args.model_dir)
 
     print(f"\n{'='*80}")
     print(f"ANALYSIS COMPLETE")
