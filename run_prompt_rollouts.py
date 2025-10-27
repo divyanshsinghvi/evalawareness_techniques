@@ -215,7 +215,7 @@ class PromptRollout:
             async with self.semaphore:
                 # Build kwargs for API call
                 api_kwargs = {
-                        "model": self.model,
+                    "model": self.model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": formatted_prompt}
