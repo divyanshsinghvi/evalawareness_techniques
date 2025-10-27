@@ -219,7 +219,7 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
             extra_body = {}
             if "qwen3-32b" in judge_model.lower():
                 extra_body["provider"] = {
-                    "order": ["DeepInfra", "nCompass"],
+                    "order": ["DeepInfra", "ncompass/fp8"],
                     "allow_fallbacks": False
                 }
 
@@ -331,7 +331,7 @@ async def score_response(client: AsyncOpenAI, response_text: str, judge_model: s
             extra_body = {}
             if "qwen3-32b" in judge_model.lower():
                 extra_body["provider"] = {
-                    "order": ["DeepInfra", "nCompass"],
+                    "order": ["DeepInfra", "ncompass/fp8"],
                     "allow_fallbacks": False
                 }
 
