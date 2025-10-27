@@ -1157,6 +1157,58 @@ def analyze_eval_awareness(rollouts: List[RolloutData]) -> None:
             print(f"\n📁 Saved {len(all_high_aware_high_change)} high-performing prompts to: {output_file}")
             print(f"   ({len(perfect_perfect)} perfect 100%/100%, {len(perfect_aware_high_change)} perfect awareness, {len(high_aware_high_change)} high awareness)")
 
+        # Save all prompts with behavior change >= 50% to CSV
+        high_behavior_change = [p for p in prompt_stats if p['change_rate'] >= 50]
+        if high_behavior_change:
+            # Get model directory (reuse from above if available, otherwise recalculate)
+            if not all_high_aware_high_change:
+                first_prompt_rollouts = by_prompt[list(by_prompt.keys())[0]]
+                first_rollout_path = first_prompt_rollouts[0].filepath
+                model_dir = first_rollout_path.parts[2]
+
+            output_dir = Path('working/rollouts') / model_dir / 'analysis'
+            output_dir.mkdir(parents=True, exist_ok=True)
+            csv_output_file = output_dir / 'high_behavior_change_prompts.csv'
+
+            import csv
+            with open(csv_output_file, 'w', newline='') as csvfile:
+                fieldnames = [
+                    'prompt_name', 'scenario', 'category', 'n_seeds',
+                    'changed_count', 'no_change_count', 'change_rate',
+                    'eval_aware_count', 'eval_aware_rate',
+                    'global_count', 'explicit_count', 'implicit_count', 'none_count',
+                    'changed_with_global', 'changed_with_explicit',
+                    'changed_with_implicit', 'changed_with_none',
+                    'source_path'
+                ]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+                writer.writeheader()
+                for p in sorted(high_behavior_change, key=lambda x: x['change_rate'], reverse=True):
+                    source_path = Path('working/extracted_prompts') / p['category'] / f"{p['name']}.yaml"
+                    writer.writerow({
+                        'prompt_name': p['name'],
+                        'scenario': p['scenario'],
+                        'category': p['category'],
+                        'n_seeds': p['n_seeds'],
+                        'changed_count': p['changed_count'],
+                        'no_change_count': p['no_change_count'],
+                        'change_rate': f"{p['change_rate']:.1f}",
+                        'eval_aware_count': p['eval_aware_count'],
+                        'eval_aware_rate': f"{p['eval_aware_rate']:.1f}",
+                        'global_count': p['global_count'],
+                        'explicit_count': p['explicit_count'],
+                        'implicit_count': p['implicit_count'],
+                        'none_count': p['none_count'],
+                        'changed_with_global': p['changed_with_global'],
+                        'changed_with_explicit': p['changed_with_explicit'],
+                        'changed_with_implicit': p['changed_with_implicit'],
+                        'changed_with_none': p['changed_with_none'],
+                        'source_path': str(source_path)
+                    })
+
+            print(f"\n📊 Saved {len(high_behavior_change)} prompts with behavior change ≥50% to CSV: {csv_output_file}")
+
         if len(prompt_stats) >= 2:
             # Calculate correlation coefficient
             from scipy import stats as scipy_stats
