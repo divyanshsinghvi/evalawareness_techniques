@@ -21,30 +21,25 @@ import os
 
 
 
-def load_prompts_with_metadata(input_dir: str, mode: str, priority: str = "high-awareness"):
+def load_prompts_with_metadata(input_dir: str, mode: str, priority: str = "high_awareness_bc"):
     """
-    Load YAML prompts with metadata (source file, checksum, priority).
+    Load YAML prompts with metadata (source file, bucket, checksum).
     Ensures system prompts and user prompts are properly paired by checksum.
     
     Input directory structure (new format):
         input_dir/                          <- e.g., steer_formatted_prompts/model_name
-            high-awareness/
-                system_prompts.yaml  <- List of {source_file, checksum, priority, prompt}
-                eval_user.yaml       <- List of {source_file, checksum, priority, prompt}
-                deploy_user.yaml     <- List of {source_file, checksum, priority, prompt}
-            others/
-                system_prompts.yaml
-                eval_user.yaml
-                deploy_user.yaml
+            high_awareness_bc/
+                system_prompts.yaml  <- List of {source_file, bucket, checksum, prompt}
+                eval_user.yaml       <- List of {source_file, bucket, checksum, prompt}
+                deploy_user.yaml     <- List of {source_file, bucket, checksum, prompt}
     
     Args:
         input_dir (str): Base directory for model (e.g., steer_formatted_prompts/qwen_qwen3-32b).
         mode (str): Either 'eval' or 'deploy'.
-        priority (str): Priority subdirectory to load from. Default: 'high-awareness'. 
-                       Options: 'high-awareness', 'others'.
+        priority (str): Priority subdirectory to load from. Default: 'high_awareness_bc'.
     
     Returns:
-        tuple: (system_prompts, user_prompts, sources, checksums)
+        tuple: (system_prompts, user_prompts, sources, checksums, buckets)
               All lists are aligned - index i corresponds to the same source file and checksum
     """
     valid_modes = {"eval": "eval_user.yaml", "deploy": "deploy_user.yaml"}
@@ -80,7 +75,7 @@ def load_prompts_with_metadata(input_dir: str, mode: str, priority: str = "high-
         raise ValueError(f"Expected list in {user_path}, got {type(user_data)}")
     
     # Create dictionaries keyed by checksum for fast lookup
-    # checksum -> {source_file, priority, prompt, index}
+    # checksum -> {source_file, bucket, prompt, index}
     sys_dict = {}
     for idx, entry in enumerate(sys_data):
         if not isinstance(entry, dict):
@@ -94,7 +89,7 @@ def load_prompts_with_metadata(input_dir: str, mode: str, priority: str = "high-
         
         sys_dict[checksum] = {
             'source_file': entry.get('source_file', 'unknown'),
-            'priority': entry.get('priority', 'unknown'),
+            'bucket': entry.get('bucket', 'unknown'),
             'prompt': entry.get('prompt', ''),
             'index': idx
         }
@@ -112,7 +107,7 @@ def load_prompts_with_metadata(input_dir: str, mode: str, priority: str = "high-
         
         user_dict[checksum] = {
             'source_file': entry.get('source_file', 'unknown'),
-            'priority': entry.get('priority', 'unknown'),
+            'bucket': entry.get('bucket', 'unknown'),
             'prompt': entry.get('prompt', ''),
             'index': idx
         }
@@ -123,6 +118,7 @@ def load_prompts_with_metadata(input_dir: str, mode: str, priority: str = "high-
     user_prompts = []
     sources = []
     checksums = []
+    buckets = []
     
     # Iterate through user prompts and match with system prompts by checksum
     for checksum in sorted(user_dict.keys()):
@@ -137,17 +133,18 @@ def load_prompts_with_metadata(input_dir: str, mode: str, priority: str = "high-
                 print(f"  User: {user_entry['source_file']}")
                 continue
             
-            # Verify priorities match (they should)
-            if user_entry['priority'] != sys_entry['priority']:
-                print(f"Warning: Priority mismatch for checksum {checksum[:16]}...")
-                print(f"  System: {sys_entry['priority']}")
-                print(f"  User: {user_entry['priority']}")
+            # Verify buckets match (they should)
+            if user_entry['bucket'] != sys_entry['bucket']:
+                print(f"Warning: Bucket mismatch for checksum {checksum[:16]}...")
+                print(f"  System: {sys_entry['bucket']}")
+                print(f"  User: {user_entry['bucket']}")
                 continue
             
             system_prompts.append(sys_entry['prompt'])
             user_prompts.append(user_entry['prompt'])
             sources.append(user_entry['source_file'])
             checksums.append(checksum)
+            buckets.append(user_entry['bucket'])
     
     # Print summary
     print(f"Loaded {len(system_prompts)} matched prompt pairs from {priority_dir}")
@@ -167,7 +164,7 @@ def load_prompts_with_metadata(input_dir: str, mode: str, priority: str = "high-
             for checksum in list(unmatched_user)[:5]:
                 print(f"  - {user_dict[checksum]['source_file']} ({checksum[:16]}...)")
     
-    return system_prompts, user_prompts, sources, checksums
+    return system_prompts, user_prompts, sources, checksums, buckets
 
 
 def create_user_token_mask(
