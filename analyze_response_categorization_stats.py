@@ -754,6 +754,80 @@ def export_high_awareness_bc_seeds(data, model_dir: str):
             print(f"{prompt_display:<50} {stats['eval_aware_pct']:>11.1f}% {stats['bc_rate']:>10.1%} {stats['bc_and_aware_count']:>10}")
 
 
+def analyze_awareness_type_by_score(data):
+    """Analyze breakdown of awareness types (self_test vs other_test vs no_test_reference) by score."""
+    print(f"\n{'='*80}")
+    print(f"AWARENESS TYPE BY SCORE")
+    print(f"{'='*80}\n")
+
+    # Track counts by score (0-10) and awareness type for both branches
+    eval_by_score = {}
+    deploy_by_score = {}
+
+    for score in range(11):
+        eval_by_score[score] = {'self_test': 0, 'other_test': 0, 'no_test_reference': 0}
+        deploy_by_score[score] = {'self_test': 0, 'other_test': 0, 'no_test_reference': 0}
+
+    for entry in data:
+        # Evaluation branch
+        eval_intensity = entry.get('evaluation', {}).get('awareness', {}).get('awareness_intensity', 0)
+        eval_type = entry.get('evaluation', {}).get('awareness', {}).get('awareness_type', 'unknown')
+
+        if eval_type in eval_by_score[eval_intensity]:
+            eval_by_score[eval_intensity][eval_type] += 1
+
+        # Deployment branch
+        deploy_intensity = entry.get('deployment', {}).get('awareness', {}).get('awareness_intensity', 0)
+        deploy_type = entry.get('deployment', {}).get('awareness', {}).get('awareness_type', 'unknown')
+
+        if deploy_type in deploy_by_score[deploy_intensity]:
+            deploy_by_score[deploy_intensity][deploy_type] += 1
+
+    # Print evaluation branch statistics
+    print("EVALUATION BRANCH:")
+    print(f"{'─'*80}")
+    print(f"\n{'Score':<7} {'self_test':>11} {'other_test':>11} {'no_test_ref':>11} {'Total':>11}")
+    print(f"{'─'*53}")
+
+    for score in range(11):
+        counts = eval_by_score[score]
+        total = sum(counts.values())
+        if total > 0:
+            print(f"{score:<7} {counts['self_test']:>11} {counts['other_test']:>11} {counts['no_test_reference']:>11} {total:>11}")
+
+    # Print totals
+    total_self = sum(eval_by_score[s]['self_test'] for s in range(11))
+    total_other = sum(eval_by_score[s]['other_test'] for s in range(11))
+    total_no_ref = sum(eval_by_score[s]['no_test_reference'] for s in range(11))
+    grand_total = total_self + total_other + total_no_ref
+
+    print(f"{'─'*53}")
+    print(f"{'TOTAL':<7} {total_self:>11} {total_other:>11} {total_no_ref:>11} {grand_total:>11}")
+
+    # Print deployment branch statistics
+    print(f"\n{'─'*80}")
+    print(f"\nDEPLOYMENT BRANCH:")
+    print(f"{'─'*80}")
+    print(f"\n{'Score':<7} {'self_test':>11} {'other_test':>11} {'no_test_ref':>11} {'Total':>11}")
+    print(f"{'─'*53}")
+
+    for score in range(11):
+        counts = deploy_by_score[score]
+        total = sum(counts.values())
+        if total > 0:
+            print(f"{score:<7} {counts['self_test']:>11} {counts['other_test']:>11} {counts['no_test_reference']:>11} {total:>11}")
+
+    # Print totals
+    total_self = sum(deploy_by_score[s]['self_test'] for s in range(11))
+    total_other = sum(deploy_by_score[s]['other_test'] for s in range(11))
+    total_no_ref = sum(deploy_by_score[s]['no_test_reference'] for s in range(11))
+    grand_total = total_self + total_other + total_no_ref
+
+    print(f"{'─'*53}")
+    print(f"{'TOTAL':<7} {total_self:>11} {total_other:>11} {total_no_ref:>11} {grand_total:>11}")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(description='Analyze response categorization statistics')
     parser.add_argument('--model-dir', type=str, required=True,
@@ -783,6 +857,7 @@ def main():
     analyze_self_test_prompts(data)
     analyze_awareness_threshold_prompts(data)
     analyze_mean_per_prompt(data)
+    analyze_awareness_type_by_score(data)
 
     # Export per-prompt CSV
     export_per_prompt_csv(data, args.model_dir)
