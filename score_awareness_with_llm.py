@@ -21,6 +21,7 @@ import asyncio
 import os
 import re
 import hashlib
+import config
 
 try:
     from dotenv import load_dotenv
@@ -214,17 +215,12 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
 
     # Scale max_tokens with batch size: ~150 tokens per sentence response
     # Each JSON entry is roughly: {"index": N, "score": "\boxed{X}", "category": "...", "test_reference_flag": "..."}
-    max_tokens = min(16000, 150 * len(sentences) + 500)
+    max_tokens = min(config.JUDGE_MAX_TOKENS_BATCH, 150 * len(sentences) + 500)
 
     for attempt in range(max_retries):
         try:
             # Build extra_body for OpenRouter provider routing
-            extra_body = {}
-            if "qwen3-32b" in judge_model.lower():
-                extra_body["provider"] = {
-                    "order": ["DeepInfra", "ncompass/fp8"],
-                    "allow_fallbacks": False
-                }
+            extra_body = config.get_provider_config(judge_model)
 
             response = await client.chat.completions.create(
                 model=judge_model,
@@ -232,7 +228,7 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
                     {"role": "system", "content": SYSTEM_PROMPT_FOR_RESPONSE_JUDGE},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.0,
+                temperature=config.JUDGE_TEMPERATURE,
                 max_tokens=max_tokens,
                 extra_body=extra_body if extra_body else None
             )
@@ -326,17 +322,12 @@ async def score_response(client: AsyncOpenAI, response_text: str, judge_model: s
     prompt = RESPONSE_JUDGE_PROMPT.format(response=response_text)
 
     # Scale max_tokens with response length
-    max_tokens = min(2000, len(response_text.split()) // 2 + 500)
+    max_tokens = min(config.JUDGE_MAX_TOKENS_RESPONSE, len(response_text.split()) // 2 + 500)
 
     for attempt in range(max_retries):
         try:
             # Build extra_body for OpenRouter provider routing
-            extra_body = {}
-            if "qwen3-32b" in judge_model.lower():
-                extra_body["provider"] = {
-                    "order": ["DeepInfra", "ncompass/fp8"],
-                    "allow_fallbacks": False
-                }
+            extra_body = config.get_provider_config(judge_model)
 
             response = await client.chat.completions.create(
                 model=judge_model,
@@ -344,7 +335,7 @@ async def score_response(client: AsyncOpenAI, response_text: str, judge_model: s
                     {"role": "system", "content": SYSTEM_PROMPT_FOR_RESPONSE_JUDGE},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.0,
+                temperature=config.JUDGE_TEMPERATURE,
                 max_tokens=max_tokens,
                 extra_body=extra_body if extra_body else None
             )
@@ -398,20 +389,20 @@ async def score_response(client: AsyncOpenAI, response_text: str, judge_model: s
 
 async def main():
     parser = argparse.ArgumentParser(description='Score awareness sentences with LLM judge')
-    parser.add_argument('--input', default='working/awareness_sentences_categorized.json',
-                       help='Input JSON with awareness sentences')
-    parser.add_argument('--output', default='working/awareness_llm_scores.json',
-                       help='Output JSON with scores')
-    parser.add_argument('--judge-model', default='qwen/qwen3-32b',
-                       help='LLM judge model to use (OpenRouter format)')
+    parser.add_argument('--input', default=str(config.AWARENESS_SENTENCES_FILE),
+                       help=f'Input JSON with awareness sentences (default: {config.AWARENESS_SENTENCES_FILE})')
+    parser.add_argument('--output', default=str(config.AWARENESS_SCORES_FILE),
+                       help=f'Output JSON with scores (default: {config.AWARENESS_SCORES_FILE})')
+    parser.add_argument('--judge-model', default=config.DEFAULT_JUDGE_MODEL,
+                       help=f'LLM judge model to use (default: {config.DEFAULT_JUDGE_MODEL})')
     parser.add_argument('--limit', type=int, default=None,
                        help='Limit sentences per category (for testing)')
     parser.add_argument('--include-general', action='store_true',
                        help='Also score general sentences as baseline')
     parser.add_argument('--concurrency', type=int, default=10,
                        help='Number of concurrent requests (default: 10)')
-    parser.add_argument('--batch-size', type=int, default=5,
-                       help='Number of sentences per batch (default: 5, use 1 for single-sentence mode)')
+    parser.add_argument('--batch-size', type=int, default=config.JUDGE_BATCH_SIZE,
+                       help=f'Number of sentences per batch (default: {config.JUDGE_BATCH_SIZE}, use 1 for single-sentence mode)')
 
     args = parser.parse_args()
 
@@ -430,7 +421,7 @@ async def main():
 
     # Initialize OpenRouter client
     client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
+        base_url=config.OPENROUTER_BASE_URL,
         api_key=os.environ.get("OPENROUTER_API_KEY")
     )
 
@@ -452,7 +443,7 @@ async def main():
 
     # Load general sentences if requested
     if args.include_general:
-        general_path = Path('working/general_sentences.txt')
+        general_path = config.GENERAL_SENTENCES_FILE
         if general_path.exists():
             with open(general_path, 'r') as f:
                 lines = [line.strip() for line in f.readlines() if line.strip() and not line.startswith('=')]
