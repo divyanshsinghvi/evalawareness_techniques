@@ -40,6 +40,7 @@ class OpenRouterClient:
         model: str,
         api_key: Optional[str] = None,
         temperature: float = 1.0,
+        top_p: float = 0.95,
         max_tokens: int = 4000,
         timeout: int = 300,
         verbose: bool = False,
@@ -49,6 +50,7 @@ class OpenRouterClient:
         self.model = model
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         self.temperature = temperature
+        self.top_p = top_p
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.verbose = verbose
@@ -74,6 +76,7 @@ class OpenRouterClient:
         self,
         messages: List[Dict[str, str]],
         temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
         max_tokens: Optional[int] = None
     ) -> ThinkingResponse:
         """
@@ -82,6 +85,7 @@ class OpenRouterClient:
         Args:
             messages: List of message dicts with 'role' and 'content'
             temperature: Override default temperature
+            top_p: Override default top_p
             max_tokens: Override default max_tokens
 
         Returns:
@@ -96,6 +100,7 @@ class OpenRouterClient:
             "model": self.model,
             "messages": messages,
             "temperature": temperature if temperature is not None else self.temperature,
+            "top_p": top_p if top_p is not None else self.top_p,
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
         }
 
