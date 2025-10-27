@@ -566,13 +566,14 @@ class PromptRollout:
         return filepath
 
 
-def find_prompt_files(category: Optional[str] = None, input_files: Optional[List[str]] = None, include_incomplete: bool = False) -> List[Path]:
+def find_prompt_files(category: Optional[str] = None, input_files: Optional[List[str]] = None, include_incomplete: bool = False, prompt_list: Optional[str] = None) -> List[Path]:
     """Find extracted prompt YAML files.
 
     Args:
         category: Filter by category (e.g., 'behavioral_change')
         input_files: Specific files to process
         include_incomplete: If False, skip files in 'incomplete' directory (default: False)
+        prompt_list: Path to file containing prompt names to filter
     """
     if input_files:
         return [Path(f) for f in input_files if Path(f).exists()]
@@ -597,6 +598,37 @@ def find_prompt_files(category: Optional[str] = None, input_files: Optional[List
     # Filter out incomplete directory unless explicitly requested
     if not include_incomplete and category != 'incomplete':
         files = [f for f in files if 'incomplete' not in f.parts]
+
+    # Filter by prompt list if provided
+    if prompt_list:
+        prompt_list_path = Path(prompt_list)
+        if not prompt_list_path.exists():
+            print(f"Error: Prompt list file {prompt_list} not found!")
+            exit(1)
+
+        # Parse prompt names from the file
+        prompt_names = set()
+        with open(prompt_list_path) as f:
+            for line in f:
+                line = line.strip()
+                # Skip comments and empty lines
+                if not line or line.startswith('#'):
+                    continue
+                # Extract prompt name from lines like "Prompt: information_withholding_2025-10-24_04-25-40_ced2d7e1"
+                if line.startswith('Prompt:'):
+                    prompt_name = line.split(':', 1)[1].strip()
+                    prompt_names.add(prompt_name)
+
+        # Filter files to only include those matching prompt names
+        filtered_files = []
+        for file in files:
+            # Extract prompt name from file stem (filename without .yaml)
+            file_stem = file.stem
+            if file_stem in prompt_names:
+                filtered_files.append(file)
+
+        print(f"Filtered {len(files)} files to {len(filtered_files)} files from prompt list")
+        files = filtered_files
 
     return files
 
@@ -948,7 +980,7 @@ async def main_async(args):
     # Handle "all" category as None (no filter)
     category_filter = None if args.category == 'all' else args.category
 
-    files = find_prompt_files(category_filter, args.input, args.include_incomplete)
+    files = find_prompt_files(category_filter, args.input, args.include_incomplete, args.prompt_list)
 
     if args.limit:
         files = files[:args.limit]
@@ -1017,6 +1049,8 @@ Experiments:
                        help='Include files from incomplete directory (default: skip incomplete)')
     parser.add_argument('--request-delay', type=float, default=1,
                        help='Delay in seconds between API requests to avoid rate limiting (default: 1, use 60 for 1 minute)')
+    parser.add_argument('--prompt-list', type=str,
+                       help='Path to file containing prompt names to filter (e.g., high_awareness_high_change_prompts.txt)')
 
     args = parser.parse_args()
 

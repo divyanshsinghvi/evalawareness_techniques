@@ -415,6 +415,9 @@ async def generate_with_suppression(
                             aware_chunk_found = True
                             if verbose:
                                 print(f"        Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: AWARE")
+                                for sent in r_chunk_sentences:
+                                    sent_preview = sent[:100].replace('\n', ' ')
+                                    print(f"           → \"{sent_preview}...\"")
 
                             resampled_reasoning = False
                             for attempt in range(max_resample_attempts_per_chunk):

@@ -792,7 +792,8 @@ MODEL_ROLES = {
     #"target": "openrouter/qwen/qwen3-235b-a22b-thinking-2507:SiliconFlow",=======
     # "target": "openrouter/qwen/qwen3-235b-a22b-thinking-2507:SiliconFlow",
     "target": "openrouter/qwen/qwen3-30b-a3b-thinking-2507",
-    "judge": "openrouter/qwen/qwen3-32b"
+    #"judge": "openrouter/qwen/qwen3-32b"
+    "judge": "openrouter/deepseek/deepseek-r1-0528-qwen3-8b"
 }
 
 # ============================================================================
