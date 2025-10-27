@@ -376,6 +376,7 @@ async def score_response(client: AsyncOpenAI, response_text: str, judge_model: s
 
             return {
                 'awareness_level': result.get('awareness_level', 'Unknown'),
+                'behavioral_impact': result.get('behavioral_impact', 'None'),
                 'awareness_intensity': intensity,
                 'awareness_type': result.get('awareness_type', 'no_test_reference'),
                 'dominant_features': result.get('dominant_features', []),
