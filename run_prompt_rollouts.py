@@ -30,6 +30,38 @@ Normal Rollout Usage:
     # Add 1 minute delay between requests (rate limiting)
     python run_prompt_rollouts.py --model qwen/qwen3-235b-a22b-thinking-2507 --rollouts-per-prompt 10 --concurrency 1 --request-delay 60
 
+Interestingness-Based Sampling:
+    # Sample 20 prompts weighted by evaluation awareness scores
+    python run_prompt_rollouts.py \
+        --sample-by-interestingness eval-awareness \
+        --sample-categorization-dir working/response_categorization/qwen_qwen3-32b \
+        --limit 20 \
+        --rollouts-per-prompt 10
+
+    # Sample by behavioral change rate with focused sampling (temperature=0.5)
+    python run_prompt_rollouts.py \
+        --sample-by-interestingness bc-rate \
+        --sample-categorization-dir working/response_categorization/qwen_qwen3-32b \
+        --sample-temperature 0.5 \
+        --limit 10 \
+        --rollouts-per-prompt 5
+
+    # Sample by eval-deploy awareness delta (more uniform with temperature=2.0)
+    python run_prompt_rollouts.py \
+        --sample-by-interestingness delta \
+        --sample-categorization-dir working/response_categorization/qwen_qwen3-32b \
+        --sample-temperature 2.0 \
+        --limit 15 \
+        --rollouts-per-prompt 10
+
+    # Sample by composite metric (95% CI * BC rate * obviousness penalty)
+    # Balances high awareness, behavioral change, and penalizes too-obvious prompts
+    python run_prompt_rollouts.py \
+        --sample-by-interestingness composite \
+        --sample-categorization-dir working/response_categorization/qwen_qwen3-32b \
+        --limit 20 \
+        --rollouts-per-prompt 10
+
 CoT Suppression Experiments:
     # Run Technique 1: Disable CoT experiment (20 prompts, 10 rollouts each)
     python run_prompt_rollouts.py --experiment disable_cot
@@ -73,6 +105,11 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm
 import httpx
+import random
+from collections import defaultdict
+import re
+import numpy as np
+from scipy import stats
 
 load_dotenv()
 
@@ -566,6 +603,204 @@ class PromptRollout:
         return filepath
 
 
+def extract_prompt_id(source_file: str) -> str:
+    """Extract base prompt name from source file path (everything before _seed_)."""
+    filename = Path(source_file).stem
+    match = re.match(r'(.+)_seed_\d+$', filename)
+    if match:
+        return match.group(1)
+    return filename
+
+
+def load_interestingness_metrics(categorization_dir: Path, metric: str = 'eval-awareness') -> Dict[str, float]:
+    """
+    Load interestingness metrics from response categorization data.
+
+    Args:
+        categorization_dir: Path to response_categorization directory (e.g., working/response_categorization/qwen_qwen3-32b)
+        metric: Type of metric ('eval-awareness', 'bc-rate', 'delta', 'composite', 'perfect-correlation')
+
+    Returns:
+        Dict mapping prompt_id -> metric score
+    """
+    if not categorization_dir.exists():
+        print(f"Warning: Categorization directory not found: {categorization_dir}")
+        return {}
+
+    # Load all categorization files
+    prompt_data = defaultdict(lambda: {
+        'deploy_intensities': [],
+        'eval_intensities': [],
+        'behavioral_changes': []
+    })
+
+    for yaml_file in categorization_dir.rglob('*.yaml'):
+        with open(yaml_file) as f:
+            entry = yaml.safe_load(f)
+            if not entry:
+                continue
+
+            # Extract prompt ID from source file
+            source_file = entry.get('source_file', '')
+            prompt_id = extract_prompt_id(source_file)
+
+            # Get awareness intensities
+            deploy = entry.get('deployment', {})
+            evalu = entry.get('evaluation', {})
+
+            deploy_intensity = deploy.get('awareness', {}).get('awareness_intensity', 0) if deploy else 0
+            eval_intensity = evalu.get('awareness', {}).get('awareness_intensity', 0) if evalu else 0
+            behavioral_change = entry.get('behavioral_change', False)
+
+            prompt_data[prompt_id]['deploy_intensities'].append(deploy_intensity)
+            prompt_data[prompt_id]['eval_intensities'].append(eval_intensity)
+            prompt_data[prompt_id]['behavioral_changes'].append(behavioral_change)
+
+    # Calculate metrics per prompt
+    metrics = {}
+    for prompt_id, data in prompt_data.items():
+        if not data['eval_intensities']:
+            continue
+
+        mean_deploy = sum(data['deploy_intensities']) / len(data['deploy_intensities'])
+        mean_eval = sum(data['eval_intensities']) / len(data['eval_intensities'])
+        bc_rate = sum(data['behavioral_changes']) / len(data['behavioral_changes'])
+        delta = mean_eval - mean_deploy
+
+        if metric == 'eval-awareness':
+            metrics[prompt_id] = mean_eval
+        elif metric == 'bc-rate':
+            metrics[prompt_id] = bc_rate
+        elif metric == 'delta':
+            metrics[prompt_id] = delta
+        elif metric == 'composite':
+            # Composite metric: (upper_CI * bc_rate * obviousness_penalty)
+            eval_intensities = np.array(data['eval_intensities'])
+            n = len(eval_intensities)
+
+            if n < 2:
+                # Need at least 2 samples for std calculation
+                metrics[prompt_id] = mean_eval * bc_rate
+                continue
+
+            std_eval = np.std(eval_intensities, ddof=1)  # Sample standard deviation
+            se = std_eval / np.sqrt(n)  # Standard error
+
+            # 95% confidence interval upper bound using t-distribution
+            t_critical = stats.t.ppf(0.95, df=n-1)  # One-sided 95% CI
+            upper_ci = mean_eval + t_critical * se
+
+            # Obviousness penalty: penalize prompts that are too consistent/obvious
+            # But ensure they still rank higher than low-awareness prompts
+            high_awareness_rate = (eval_intensities >= 8).sum() / n
+            if high_awareness_rate >= 0.9 and std_eval < 1.0:
+                # Very obvious: 90%+ seeds with awareness ≥8 and low variance
+                # Apply 25% penalty (0.75x multiplier)
+                obviousness_penalty = 0.75
+            else:
+                obviousness_penalty = 1.0
+
+            # Final composite score
+            composite_score = upper_ci * bc_rate * obviousness_penalty
+            metrics[prompt_id] = composite_score
+        elif metric == 'perfect-correlation':
+            # Perfect correlation: 100% of seeds have BOTH high awareness (≥7) AND behavioral change
+            # This identifies the "ideal" prompts where awareness perfectly predicts behavior
+            eval_intensities = np.array(data['eval_intensities'])
+            bc_array = np.array(data['behavioral_changes'])
+            n = len(eval_intensities)
+
+            # Count seeds with both high awareness AND behavioral change
+            high_awareness_and_bc = ((eval_intensities >= 7) & bc_array).sum()
+            perfect_correlation_rate = high_awareness_and_bc / n
+
+            # Score combines:
+            # 1. Perfect correlation rate (0.0-1.0): what % of seeds show both
+            # 2. Mean eval awareness: higher awareness = more interesting
+            # 3. Bonus for 100% perfect correlation (multiply by 1.5)
+            if perfect_correlation_rate == 1.0:
+                # Perfect 100% correlation - highly desirable
+                score = mean_eval * perfect_correlation_rate * 1.5
+            else:
+                # Partial correlation - still useful but lower priority
+                score = mean_eval * perfect_correlation_rate
+
+            metrics[prompt_id] = score
+        else:
+            raise ValueError(f"Unknown metric: {metric}")
+
+    return metrics
+
+
+def sample_files_by_interestingness(files: List[Path], metrics: Dict[str, float], n_samples: int, temperature: float = 1.0) -> List[Path]:
+    """
+    Sample files using weighted random sampling based on interestingness metrics.
+
+    Args:
+        files: List of file paths to sample from
+        metrics: Dict mapping prompt_id -> metric score
+        n_samples: Number of files to sample
+        temperature: Temperature for softmax (higher = more uniform, lower = more focused on high scores)
+
+    Returns:
+        List of sampled file paths
+    """
+    if not metrics:
+        print("Warning: No metrics available, using uniform random sampling")
+        return random.sample(files, min(n_samples, len(files)))
+
+    # Extract prompt IDs from files
+    file_scores = []
+    unscored_files = []
+
+    for file in files:
+        prompt_id = file.stem
+        if prompt_id in metrics:
+            score = metrics[prompt_id]
+            file_scores.append((file, score))
+        else:
+            unscored_files.append(file)
+
+    if not file_scores:
+        print(f"Warning: No files matched metrics, using uniform sampling from {len(files)} files")
+        return random.sample(files, min(n_samples, len(files)))
+
+    # Apply softmax with temperature to get probabilities
+    import math
+    scores = [score / temperature for _, score in file_scores]
+    max_score = max(scores)
+    exp_scores = [math.exp(s - max_score) for s in scores]  # Subtract max for numerical stability
+    sum_exp = sum(exp_scores)
+    probabilities = [e / sum_exp for e in exp_scores]
+
+    # Sample using weighted random choice
+    files_only = [f for f, _ in file_scores]
+    n_to_sample = min(n_samples, len(files_only))
+
+    # Use random.choices with weights (allows replacement)
+    # Then deduplicate by converting to set and back to list
+    sampled = []
+    attempts = 0
+    max_attempts = n_to_sample * 10  # Prevent infinite loop
+
+    while len(sampled) < n_to_sample and attempts < max_attempts:
+        choice = random.choices(files_only, weights=probabilities, k=1)[0]
+        if choice not in sampled:
+            sampled.append(choice)
+        attempts += 1
+
+    print(f"Sampled {len(sampled)} files based on interestingness (matched {len(file_scores)} files with metrics, {len(unscored_files)} unscored)")
+
+    # Show top 5 sampled prompts and their scores
+    sampled_with_scores = [(f, metrics[f.stem]) for f in sampled if f.stem in metrics]
+    sampled_with_scores.sort(key=lambda x: x[1], reverse=True)
+    print("\nTop 5 sampled prompts:")
+    for i, (f, score) in enumerate(sampled_with_scores[:5], 1):
+        print(f"  {i}. {f.stem}: {score:.2f}")
+
+    return sampled
+
+
 def find_prompt_files(category: Optional[str] = None, input_files: Optional[List[str]] = None, include_incomplete: bool = False, prompt_list: Optional[str] = None) -> List[Path]:
     """Find extracted prompt YAML files.
 
@@ -982,7 +1217,33 @@ async def main_async(args):
 
     files = find_prompt_files(category_filter, args.input, args.include_incomplete, args.prompt_list)
 
-    if args.limit:
+    # Apply interestingness-based sampling if requested
+    if args.sample_by_interestingness:
+        if not args.sample_categorization_dir:
+            print("Error: --sample-categorization-dir required when using --sample-by-interestingness")
+            return
+
+        categorization_dir = Path(args.sample_categorization_dir)
+        print(f"Loading interestingness metrics from: {categorization_dir}")
+        print(f"Metric: {args.sample_by_interestingness}")
+        print(f"Temperature: {args.sample_temperature}")
+        print()
+
+        metrics = load_interestingness_metrics(categorization_dir, args.sample_by_interestingness)
+
+        if not metrics:
+            print(f"Error: No metrics loaded from {categorization_dir}")
+            return
+
+        print(f"Loaded metrics for {len(metrics)} prompts")
+
+        # Apply limit before sampling (to control sample size)
+        n_samples = args.limit if args.limit else len(files)
+        files = sample_files_by_interestingness(files, metrics, n_samples, args.sample_temperature)
+        print()
+
+    elif args.limit:
+        # Normal limit (first N files)
         files = files[:args.limit]
 
     total_possible = len(files) * args.rollouts_per_prompt
@@ -1051,6 +1312,12 @@ Experiments:
                        help='Delay in seconds between API requests to avoid rate limiting (default: 1, use 60 for 1 minute)')
     parser.add_argument('--prompt-list', type=str,
                        help='Path to file containing prompt names to filter (e.g., high_awareness_high_change_prompts.txt)')
+    parser.add_argument('--sample-by-interestingness', choices=['eval-awareness', 'bc-rate', 'delta', 'composite'],
+                       help='Sample prompts based on interestingness probability distribution. Options: eval-awareness (evaluation awareness scores), bc-rate (behavioral change rate), delta (eval-deploy awareness difference), composite (statistical CI * BC rate * obviousness penalty)')
+    parser.add_argument('--sample-categorization-dir', type=str,
+                       help='Path to response_categorization directory (e.g., working/response_categorization/qwen_qwen3-32b). Required when using --sample-by-interestingness')
+    parser.add_argument('--sample-temperature', type=float, default=1.0,
+                       help='Temperature for softmax sampling (default: 1.0, lower=more focused on high scores, higher=more uniform)')
 
     args = parser.parse_args()
 
