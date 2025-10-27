@@ -18,21 +18,21 @@ echo "Project root: $PROJECT_ROOT"
 echo ""
 
 # Set up model and paths
-MODEL="qwen_qwen3-32b"
-MODEL_PATH="Qwen/Qwen3-32B"
+MODEL="qwen_qwen3-30b-a3b-thinking-2507"
+MODEL_PATH="/pscratch/sd/r/ritesh11/temp/models/Qwen3-30B-A3B-Thinking-2507"
 
 # Base directories (script will construct full paths automatically)
-BASE_PROMPTS_DIR="working/steer_formatted_prompts"  # Will use: BASE_PROMPTS_DIR/MODEL
-BASE_OUTPUT_DIR="working/steered-outs"              # Will create: BASE_OUTPUT_DIR/MODEL/PRIORITY/VEC_TYPE/MODE
-STEERING_VEC_DIR="working/steering_vectors"
+BASE_PROMPTS_DIR="/pscratch/sd/r/ritesh11/temp/working/steer_formatted_prompts"  # Will use: BASE_PROMPTS_DIR/MODEL
+BASE_OUTPUT_DIR="/pscratch/sd/r/ritesh11/temp/working/steered-outs"              # Will create: BASE_OUTPUT_DIR/MODEL/PRIORITY/VEC_TYPE/MODE
+STEERING_VEC_DIR="/pscratch/sd/r/ritesh11/temp/working/steering-vecs/qwen_qwen-3-30b-a3b-thinking-2507/tim"
 
 # Configuration
 MODE="eval"  # or "deploy"
 PRIORITY="high_awareness_bc"
-VEC_TYPE="crosscoder"  # or your vector type
+VEC_TYPE="tim"  # or your vector type
 
 # Model dimensions (adjust based on your model)
-D_MODEL=4096
+D_MODEL=2048
 MODEL_LEN=48
 
 # Steering configuration
@@ -41,17 +41,17 @@ STEER_ON_THINKING=true
 STEER_ON_SYSTEM=false
 
 # Generation settings
-BATCH_SIZE=16
+BATCH_SIZE=128
 MAX_NEW_TOKENS=3000
 TEMPERATURE=0.7
-TOP_P=0.95
+TOP_P=1
 DTYPE="bfloat16"
-SEED=42
+SEED=0
 
 # Steering parameters
-LAYER_RANGE=(16 32)  # First and last layer to consider
-NUM_LAYERS=(1 3 5)    # Number of layers to steer
-STRENGTH=(0.5 1.0 -0.5 -1.0)  # Positive for eval (increase awareness), negative for deploy (decrease awareness)
+LAYER_RANGE=(5 20)  # First and last layer to consider
+NUM_LAYERS=(4)    # Number of layers to steer
+STRENGTH=(3.5)  # Positive for eval (increase awareness), negative for deploy (decrease awareness)
 
 # Construct full paths that will be used
 FULL_PROMPTS_DIR="$BASE_PROMPTS_DIR/$MODEL"
