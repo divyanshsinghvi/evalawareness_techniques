@@ -408,8 +408,8 @@ def apply_steering_to_layer(
         steering_mask: Boolean mask of shape (batch, seq_len) indicating user tokens
     """
     # Expand mask to match layer output dimensions
-    # assert steering_mask.shape[0] == layer_envoy.output[0].shape[0], f"Batch size mismatch: {steering_mask.shape[0]} != {layer_envoy.output[0].shape[0]}"
-    # assert steering_mask.shape[1] == layer_envoy.output[0].shape[1], f"Sequence length mismatch: {steering_mask.shape[1]} != {layer_envoy.output[0].shape[1]}"
+    # assert steering_mask.shape[0] == layer_envoy.output.shape[0], f"Batch size mismatch: {steering_mask.shape[0]} != {layer_envoy.output.shape[0]}"
+    # assert steering_mask.shape[1] == layer_envoy.output.shape[1], f"Sequence length mismatch: {steering_mask.shape[1]} != {layer_envoy.output.shape[1]}"
 
     mask_expanded = steering_mask.unsqueeze(-1).expand_as(layer_envoy.output)  # (batch, seq_len, d_model)
     
@@ -461,7 +461,7 @@ def prepare_steering_vectors(
         for vector, multiplier in list(steering_vectors.items())[1:]:
             total_steering = total_steering + vector * multiplier
     else:
-        total_steering = torch.zeros(d_model)
+        total_steering = torch.zeros(d_model, device="cuda")
     
     # Prepare vector list for multi-layer steering
     steering_vec_list = None
@@ -516,7 +516,7 @@ def load_steering_vectors_from_npy(
         - Returns {tensor: multiplier} format expected by steer_and_generate()
     """
     # Initialize zero tensor for all layers
-    full_steering = torch.zeros(model_len, d_model)
+    full_steering = torch.zeros(model_len, d_model, device='cuda')
     
     # Load and insert steering vectors for specified layers
     for layer_idx in layer_indices:
@@ -536,7 +536,7 @@ def load_steering_vectors_from_npy(
             )
         
         # Insert into the full steering tensor at the correct layer position
-        full_steering[layer_idx] = torch.from_numpy(steering_vec)
+        full_steering[layer_idx] = torch.from_numpy(steering_vec).to('cuda')
     
     # Return in the format expected by steer_and_generate
     # The dict maps tensor -> multiplier
