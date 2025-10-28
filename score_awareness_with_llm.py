@@ -334,6 +334,8 @@ async def score_sentence(client: AsyncOpenAI, sentence: str, judge_model: str, m
 
 async def score_response(client: AsyncOpenAI, response_text: str, judge_model: str, max_retries: int = 3) -> Dict:
     """Score an entire response for overall evaluation awareness using RESPONSE_JUDGE_PROMPT."""
+    import time
+
     prompt = RESPONSE_JUDGE_PROMPT.format(response=response_text)
 
     # Scale max_tokens with response length
@@ -344,6 +346,7 @@ async def score_response(client: AsyncOpenAI, response_text: str, judge_model: s
             # Build extra_body for OpenRouter provider routing
             extra_body = config.get_provider_config(judge_model)
 
+            start_time = time.time()
             response = await client.chat.completions.create(
                 model=judge_model,
                 messages=[
@@ -354,6 +357,8 @@ async def score_response(client: AsyncOpenAI, response_text: str, judge_model: s
                 max_tokens=max_tokens,
                 extra_body=extra_body if extra_body else None
             )
+            api_time = time.time() - start_time
+            print(f"  ⏱️  Judge API call: {api_time:.2f}s")
 
             if not response or not response.choices:
                 raise Exception("Empty response from API")
@@ -390,7 +395,8 @@ async def score_response(client: AsyncOpenAI, response_text: str, judge_model: s
                 'awareness_type': result.get('awareness_type', 'no_test_reference'),
                 'dominant_features': result.get('dominant_features', []),
                 'response_summary': result.get('response_summary', ''),
-                'raw_response': content
+                'raw_response': content,
+                'api_time': api_time
             }
 
         except Exception as e:

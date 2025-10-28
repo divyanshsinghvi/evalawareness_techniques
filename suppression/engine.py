@@ -92,6 +92,8 @@ class SuppressionResult:
     suppression_successful: bool
     all_detected_aware_sentences: List[str]
     chunk_resample_details: List[ChunkResampleInfo]
+    total_api_time: float = 0.0
+    api_call_count: int = 0
 
 
 def calculate_adaptive_max_tokens(
@@ -99,7 +101,7 @@ def calculate_adaptive_max_tokens(
     chunk_strategy: str,
     base_tokens: int = 100,
     growth_rate: float = 1.5,
-    max_cap: int = 1000,
+    max_cap: int = 300,
     consecutive_aware_count: int = 0
 ) -> int:
     """
@@ -356,6 +358,13 @@ async def generate_with_suppression(
     consecutive_aware_count = 0  # Track consecutive aware chunks for adaptive tokens
     consecutive_empty_content_count = 0  # Track consecutive empty content generations
 
+    # Track API timing
+    total_api_time = 0.0
+    api_call_count = 0
+
+    # Track if we should force close thinking tag (when reasoning is clean but no content generated)
+    force_close_thinking = False
+
     # Accumulate clean reasoning and content separately
     # Start with any initial prefill provided
     clean_reasoning = initial_reasoning
@@ -424,22 +433,34 @@ async def generate_with_suppression(
                 print(f"\n  🔧 PREFILL DETAILS:")
                 if clean_reasoning:
                     print(f"     Reasoning: {len(clean_reasoning)} chars")
-                    # Split into sentences to show each one
+                    # Split into sentences to show first and last few
                     reasoning_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', clean_reasoning)
                     print(f"     {len(reasoning_sentences)} sentences in reasoning:")
-                    for i, sent in enumerate(reasoning_sentences[:20]):  # Show first 20
+                    # Show first 5 sentences
+                    for i, sent in enumerate(reasoning_sentences[:5]):
                         print(f"       [{i+1}] {sent}")
-                    if len(reasoning_sentences) > 20:
-                        print(f"       ... ({len(reasoning_sentences) - 20} more sentences)")
+                    if len(reasoning_sentences) > 10:
+                        print(f"       ... ({len(reasoning_sentences) - 10} middle sentences)")
+                    # Show last 5 sentences
+                    if len(reasoning_sentences) > 5:
+                        start_idx = max(5, len(reasoning_sentences) - 5)
+                        for i in range(start_idx, len(reasoning_sentences)):
+                            print(f"       [{i+1}] {reasoning_sentences[i]}")
 
                 if clean_content:
                     print(f"\n     Content: {len(clean_content)} chars")
                     content_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', clean_content)
                     print(f"     {len(content_sentences)} sentences in content:")
-                    for i, sent in enumerate(content_sentences[:20]):  # Show first 20
+                    # Show first 5 sentences
+                    for i, sent in enumerate(content_sentences[:5]):
                         print(f"       [{i+1}] {sent}")
-                    if len(content_sentences) > 20:
-                        print(f"       ... ({len(content_sentences) - 20} more sentences)")
+                    if len(content_sentences) > 10:
+                        print(f"       ... ({len(content_sentences) - 10} middle sentences)")
+                    # Show last 5 sentences
+                    if len(content_sentences) > 5:
+                        start_idx = max(5, len(content_sentences) - 5)
+                        for i in range(start_idx, len(content_sentences)):
+                            print(f"       [{i+1}] {content_sentences[i]}")
             else:
                 print(f"\n  🔧 PREFILL: (empty - first generation)")
             print()
@@ -448,8 +469,12 @@ async def generate_with_suppression(
         current_messages = client.format_messages_with_prefill(
             base_messages=base_messages,
             prefill_content=clean_content,
-            prefill_reasoning=clean_reasoning
+            prefill_reasoning=clean_reasoning,
+            force_close_thinking=force_close_thinking
         )
+        # Reset force_close flag after using it
+        if force_close_thinking:
+            force_close_thinking = False
 
         # Generate deterministic seed for this iteration
         generation_seed = generate_deterministic_seed(
@@ -466,6 +491,8 @@ async def generate_with_suppression(
 
         # Generate continuation with adaptive token limit
         response = await client.generate(current_messages, max_tokens=generation_max_tokens, seed=generation_seed)
+        total_api_time += response.api_time
+        api_call_count += 1
 
         if verbose:
             print(f"\n  📥 RESPONSE (ThinkingResponse):")
@@ -474,18 +501,6 @@ async def generate_with_suppression(
         # Extract new reasoning and content
         continuation_reasoning = response.reasoning
         continuation_content = response.content
-
-        if not continuation_content:
-            if verbose:
-                print("  ⚠️  No content generated this iteration, continuing to generate content...")
-            # Don't break - continue generating until we have content with boxed answer
-            # Skip reasoning/content checks and loop again
-            if not continuation_reasoning:
-                if verbose:
-                    print("  ⚠️  No reasoning or content generated, stopping")
-                break
-            # Continue to next iteration to generate content
-            continue
 
         if verbose:
             print(f"\n  📤 GENERATED OUTPUT:")
@@ -508,57 +523,49 @@ async def generate_with_suppression(
                     print(f"       [{i+1}] {sent}")
                 if len(content_sentences) > 15:
                     print(f"       ... ({len(content_sentences) - 15} more sentences)")
+            else:
+                print(f"     ⚠️  No content generated (model closed </thinking> without content)")
 
-        # Check reasoning for awareness with chosen strategy (only if we have content too, otherwise skip to next generation)
-        if continuation_reasoning and continuation_content:
-            is_aware, awareness_count, aware_sentences, detection_details = await is_chunk_aware(continuation_reasoning)
-            if is_aware:
-                # Reasoning contains awareness - handle based on strategy
-                had_awareness_this_iteration = True
-                resampling_iterations += 1
-                total_awareness_detected += awareness_count
-                all_detected_aware_sentences.extend(aware_sentences)
-
+        # STEP 1: Process reasoning for awareness (always check if reasoning was generated)
+        had_awareness_this_iteration = False
+        if continuation_reasoning:
+            # For chunk_resample strategy, skip full reasoning check and go directly to chunk processing
+            # This saves an expensive LLM call since we'll check chunks individually anyway
+            if reasoning_strategy == "chunk_resample":
                 if verbose:
-                    print(f"\n  🧠 REASONING AWARENESS DETECTED ({awareness_count} indicators)")
-                    print(f"     Strategy: {reasoning_strategy}")
-                    if detection_details.get('method') == 'llm_sentence':
-                        checked = detection_details.get('sentences_checked')
-                        total = detection_details.get('total_sentences')
-                        stopped_early = " (stopped early)" if checked < total else ""
-                        print(f"     Judge: checked {checked}/{total} sentences{stopped_early}, found {detection_details.get('sentences_aware')} aware (score={detection_details.get('score')}, category={detection_details.get('category')}, flag={detection_details.get('test_reference_flag')})")
-                    for sent in aware_sentences:
-                        sent_preview = sent[:80].replace('\n', ' ')
-                        print(f"        → \"{sent_preview}...\"")
+                    print(f"\n  📝 Processing reasoning with chunk_resample strategy")
+                    print(f"     Skipping full-reasoning check, will process chunk-by-chunk...")
 
-                handled = False
+                # Parse reasoning into chunks and process each
+                reasoning_chunks = parse_into_chunks(continuation_reasoning, chunk_strategy)
+                clean_reasoning_chunks = []
+                aware_chunk_found = False
 
-                # Strategy 2: Chunk Resampling
-                if reasoning_strategy in ["chunk_resample", "hybrid"]:
-                    if verbose:
-                        print(f"     🔄 Attempting reasoning chunk resampling...")
-
-                    # Parse reasoning into chunks
-                    reasoning_chunks = parse_into_chunks(continuation_reasoning, chunk_strategy)
-                    clean_reasoning_chunks = []
-                    aware_chunk_found = False
-
-                    for r_idx, r_chunk in enumerate(reasoning_chunks):
+                for r_idx, r_chunk in enumerate(reasoning_chunks):
                         r_chunk_is_aware, r_chunk_count, r_chunk_sentences, r_chunk_details = await is_chunk_aware(r_chunk)
                         if r_chunk_is_aware:
                             # Found aware reasoning chunk - try to resample it
                             aware_chunk_found = True
+                            had_awareness_this_iteration = True
+                            resampling_iterations += 1
+                            total_awareness_detected += r_chunk_count
+                            all_detected_aware_sentences.extend(r_chunk_sentences)
+
                             if verbose:
-                                print(f"        Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: AWARE")
+                                print(f"\n     🧠 Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: AWARE ({r_chunk_count} indicators)")
                                 if r_chunk_details.get('method') == 'llm_sentence':
-                                    print(f"           Judge: {detection_details.get('sentences_aware')}/{detection_details.get('sentences_checked')} sentences aware (highest score={r_chunk_details.get('score')}, category={r_chunk_details.get('category')}, flag={r_chunk_details.get('test_reference_flag')}")
+                                    print(f"        Judge: {r_chunk_details.get('sentences_aware')}/{r_chunk_details.get('total_sentences')} sentences aware (highest score={r_chunk_details.get('score')}, category={r_chunk_details.get('category')}, flag={r_chunk_details.get('test_reference_flag')})")
+                                # Show the original aware chunk
+                                original_chunk_preview = r_chunk[:120].replace('\n', ' ')
+                                print(f"        ORIGINAL: \"{original_chunk_preview}...\"")
+                                # Show aware sentences
                                 for sent in r_chunk_sentences:
                                     sent_preview = sent[:100].replace('\n', ' ')
-                                    print(f"           → \"{sent_preview}...\"")
+                                    print(f"        → \"{sent_preview}...\"")
 
                             resampled_reasoning = False
                             if verbose:
-                                print(f"        🔍 DEBUG: Starting resample loop with max_resample_attempts_per_chunk={max_resample_attempts_per_chunk}")
+                                print(f"     🔄 Attempting to resample this aware chunk (max {max_resample_attempts_per_chunk} attempts)...")
                             for attempt in range(max_resample_attempts_per_chunk):
                                 # Generate deterministic seed based on context
                                 resample_seed = generate_deterministic_seed(
@@ -571,29 +578,45 @@ async def generate_with_suppression(
 
                                 # Regenerate reasoning continuation from clean prefix
                                 temp_clean_reasoning = ' '.join(clean_reasoning_chunks)
+
+                                if verbose:
+                                    print(f"        PREFILL: {len(temp_clean_reasoning)} chars from {len(clean_reasoning_chunks)} clean chunks")
+
                                 regen_messages = client.format_messages_with_prefill(
                                     base_messages=base_messages,
                                     prefill_content="",
                                     prefill_reasoning=temp_clean_reasoning
                                 )
 
-                                regen_response = await client.generate(regen_messages, max_tokens=generation_max_tokens, seed=resample_seed)
+                                regen_response = await client.generate(regen_messages, max_tokens=100, seed=resample_seed)
+                                total_api_time += regen_response.api_time
+                                api_call_count += 1
                                 regen_reasoning = regen_response.reasoning
 
                                 if regen_reasoning:
                                     regen_r_chunks = parse_into_chunks(regen_reasoning, chunk_strategy)
                                     if regen_r_chunks:
                                         first_regen_chunk = regen_r_chunks[0]
-                                        first_chunk_is_aware, _, _, _ = await is_chunk_aware(first_regen_chunk)
+                                        first_chunk_is_aware, _, _, first_chunk_details = await is_chunk_aware(first_regen_chunk)
+
+                                        if verbose:
+                                            # Show what we got and its score
+                                            regen_preview = first_regen_chunk[:100].replace('\n', ' ')
+                                            if first_chunk_details.get('method') == 'llm_sentence':
+                                                print(f"        CHECK: score={first_chunk_details.get('score', 'N/A')}, {first_chunk_details.get('test_reference_flag', 'N/A')}")
+                                                print(f"           \"{regen_preview}...\"")
+
                                         if not first_chunk_is_aware:
                                             # Success! Clean reasoning chunk
                                             clean_reasoning_chunks.append(first_regen_chunk)
                                             resampled_reasoning = True
                                             if verbose:
-                                                print(f"        ✓ Resampled after {attempt + 1} attempts")
-                                                clean_preview = first_regen_chunk[:120].replace('\n', ' ')
-                                                print(f"           NEW: \"{clean_preview}...\"")
+                                                print(f"        ✓ Resampled after {attempt + 1} attempts - CLEAN!")
                                             break
+                                        else:
+                                            if verbose:
+                                                print(f"        ✗ Still aware after resample")
+
 
                             if verbose:
                                 print(f"        🔍 DEBUG: After resample loop, resampled_reasoning={resampled_reasoning}, reasoning_strategy={reasoning_strategy}")
@@ -623,54 +646,106 @@ async def generate_with_suppression(
                             # Clean reasoning chunk
                             clean_reasoning_chunks.append(r_chunk)
 
-                    if clean_reasoning_chunks and not aware_chunk_found:
-                        # All reasoning chunks were clean! Add to accumulated reasoning
-                        clean_reasoning += ' '.join(clean_reasoning_chunks)
-                        handled = True
-                        if verbose:
-                            print(f"     ✓ All {len(clean_reasoning_chunks)} reasoning chunks clean")
-                    elif clean_reasoning_chunks and reasoning_strategy == "chunk_resample":
-                        # Got some clean chunks before hitting aware chunk
-                        clean_reasoning += ' '.join(clean_reasoning_chunks)
-                        handled = True
-                        if verbose:
-                            print(f"     ✓ Added {len(clean_reasoning_chunks)}/{len(reasoning_chunks)} clean reasoning chunks")
-                            print(f"     🔄 Continuing to generate remaining reasoning...")
-
-                # Strategy 3: Seeding (or fallback from hybrid)
-                if not handled and reasoning_strategy in ["seed", "hybrid"]:
+                # After processing all chunks, check results
+                if clean_reasoning_chunks and not aware_chunk_found:
+                    # All reasoning chunks were clean! Add to accumulated reasoning
+                    clean_reasoning += ' '.join(clean_reasoning_chunks)
+                    handled = True
                     if verbose:
-                        print(f"     🌱 Extracting clean reasoning seed...")
-
-                    # Extract clean prefix (everything before first aware sentence)
-                    reasoning_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', continuation_reasoning)
-                    clean_seed_parts = []
-
-                    for sent in reasoning_sentences:
-                        sent_is_aware, _, _, _ = await is_chunk_aware(sent)
-                        if not sent_is_aware:
-                            clean_seed_parts.append(sent)
-                        else:
-                            # Stop at first aware sentence
-                            break
-
-                    if clean_seed_parts and len(' '.join(clean_seed_parts)) > 50:
-                        # Got meaningful clean seed
-                        clean_reasoning = ' '.join(clean_seed_parts)
-                        handled = True
-                        if verbose:
-                            seed_preview = clean_reasoning[:120].replace('\n', ' ')
-                            print(f"     ✓ Extracted {len(clean_reasoning)} chars clean seed")
-                            print(f"        → \"{seed_preview}...\"")
-                            print(f"     🔄 Using seed to steer next generation...")
-
-                if not handled:
-                    # All strategies failed - regenerate from scratch
+                        print(f"     ✓ All {len(clean_reasoning_chunks)} reasoning chunks clean")
+                elif clean_reasoning_chunks and reasoning_strategy == "chunk_resample":
+                    # Got some clean chunks before hitting aware chunk
+                    clean_reasoning += ' '.join(clean_reasoning_chunks)
+                    handled = True
                     if verbose:
-                        print(f"     ⚠️  No clean reasoning extracted, regenerating from scratch...")
+                        print(f"     ✓ Added {len(clean_reasoning_chunks)}/{len(reasoning_chunks)} clean reasoning chunks")
+                        print(f"     🔄 Continuing to generate remaining reasoning...")
+                    # Continue to next iteration to generate more reasoning
+                    continue
 
-                # Skip content processing and try again
-                continue
+            else:
+                # For other strategies (seed, hybrid), check full reasoning first
+                is_aware, awareness_count, aware_sentences, detection_details = await is_chunk_aware(continuation_reasoning)
+
+                if is_aware:
+                    # Reasoning contains awareness - handle based on strategy
+                    had_awareness_this_iteration = True
+                    resampling_iterations += 1
+                    total_awareness_detected += awareness_count
+                    all_detected_aware_sentences.extend(aware_sentences)
+
+                    if verbose:
+                        print(f"\n  🧠 REASONING AWARENESS DETECTED ({awareness_count} indicators)")
+                        print(f"     Strategy: {reasoning_strategy}")
+                        if detection_details.get('method') == 'llm_sentence':
+                            checked = detection_details.get('sentences_checked')
+                            total = detection_details.get('total_sentences')
+                            stopped_early = " (stopped early)" if checked < total else ""
+                            print(f"     Judge: checked {checked}/{total} sentences{stopped_early}, found {detection_details.get('sentences_aware')} aware (score={detection_details.get('score')}, category={detection_details.get('category')}, flag={detection_details.get('test_reference_flag')})")
+                        for sent in aware_sentences:
+                            sent_preview = sent[:80].replace('\n', ' ')
+                            print(f"        → \"{sent_preview}...\"")
+
+                    handled = False
+
+                    # Strategy 3: Seeding (or fallback from hybrid)
+                    if reasoning_strategy in ["seed", "hybrid"]:
+                        if verbose:
+                            print(f"     🌱 Extracting clean reasoning seed...")
+
+                        # Extract clean prefix (everything before first aware sentence)
+                        reasoning_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', continuation_reasoning)
+                        clean_seed_parts = []
+
+                        for sent in reasoning_sentences:
+                            sent_is_aware, _, _, _ = await is_chunk_aware(sent)
+                            if not sent_is_aware:
+                                clean_seed_parts.append(sent)
+                            else:
+                                # Stop at first aware sentence
+                                break
+
+                        if clean_seed_parts and len(' '.join(clean_seed_parts)) > 50:
+                            # Got meaningful clean seed
+                            clean_reasoning = ' '.join(clean_seed_parts)
+                            handled = True
+                            if verbose:
+                                seed_preview = clean_reasoning[:120].replace('\n', ' ')
+                                print(f"     ✓ Extracted {len(clean_reasoning)} chars clean seed")
+                                print(f"        → \"{seed_preview}...\"")
+                                print(f"     🔄 Using seed to steer next generation...")
+
+                    if not handled:
+                        # All strategies failed - regenerate from scratch
+                        if verbose:
+                            print(f"     ⚠️  No clean reasoning extracted, regenerating from scratch...")
+
+                    # Skip content processing and try again
+                    continue
+                else:
+                    # Reasoning is clean, accumulate it
+                    clean_reasoning += continuation_reasoning
+                    if verbose:
+                        print(f"  ✓ Reasoning clean, accumulated {len(continuation_reasoning)} chars")
+
+        # STEP 2: Check if we have content to process
+        if not continuation_content:
+            # Model generated reasoning but no content yet
+            # If reasoning was completely clean (no awareness), close thinking tag to force content
+            # If reasoning had awareness, keep accumulating (tag stays open or we regenerate)
+            if verbose:
+                if had_awareness_this_iteration:
+                    print(f"  ⚠️  Found awareness in reasoning, regenerating...")
+                else:
+                    print(f"  ✓ Reasoning is clean ({len(clean_reasoning)} chars total)")
+                    print(f"  🔒 Closing thinking tag to force content generation...")
+
+            # Set flag to close thinking tag on next iteration if reasoning was clean
+            if not had_awareness_this_iteration and clean_reasoning:
+                force_close_thinking = True
+
+            # Next iteration will use clean_reasoning with closed tag if clean, or regenerate if aware
+            continue
 
         # Parse content into chunks
         content_chunks = parse_into_chunks(continuation_content, chunk_strategy)
@@ -756,13 +831,17 @@ async def generate_with_suppression(
                         print(f"        Attempt {attempt + 1}/{max_resample_attempts_per_chunk}...", end=" ")
 
                     # Regenerate from current prefix
+                    # Force close thinking tag since we're in content generation mode now
                     regen_messages = client.format_messages_with_prefill(
                         base_messages=base_messages,
                         prefill_content=clean_content,
-                        prefill_reasoning=clean_reasoning
+                        prefill_reasoning=clean_reasoning,
+                        force_close_thinking=True
                     )
 
-                    regen_response = await client.generate(regen_messages, max_tokens=generation_max_tokens, seed=resample_seed)
+                    regen_response = await client.generate(regen_messages, max_tokens=100, seed=resample_seed)
+                    total_api_time += regen_response.api_time
+                    api_call_count += 1
                     regen_content = regen_response.content
 
                     if not regen_content:
@@ -916,6 +995,16 @@ async def generate_with_suppression(
     if clean_reasoning:
         reasoning_is_aware, _, _, _ = await is_chunk_aware(clean_reasoning)
 
+    # Report total API timing
+    if verbose:
+        print(f"\n{'='*80}")
+        print(f"✅ SUPPRESSION COMPLETE")
+        print(f"{'='*80}")
+        print(f"  Total API calls: {api_call_count}")
+        print(f"  Total API time: {total_api_time:.2f}s")
+        print(f"  Average per call: {total_api_time/api_call_count:.2f}s" if api_call_count > 0 else "  Average per call: N/A")
+        print(f"{'='*80}")
+
     return SuppressionResult(
         final_response=final_response,
         final_reasoning=clean_reasoning,
@@ -924,7 +1013,9 @@ async def generate_with_suppression(
         total_awareness_detected=total_awareness_detected,
         suppression_successful=(not content_is_aware and not reasoning_is_aware),
         all_detected_aware_sentences=all_detected_aware_sentences,
-        chunk_resample_details=chunk_resample_details
+        chunk_resample_details=chunk_resample_details,
+        total_api_time=total_api_time,
+        api_call_count=api_call_count
     )
 
 
