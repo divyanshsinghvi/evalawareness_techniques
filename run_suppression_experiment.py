@@ -45,6 +45,36 @@ def calculate_file_checksum(file_path: Path) -> str:
     return sha256_hash.hexdigest()
 
 
+def normalize_numbered_directory_path(relative_path: Path) -> Path:
+    """Normalize numbered overflow directories (explicit1, explicit2) back to base directory (explicit).
+
+    This handles the case where rollouts are stored in numbered subdirectories for HuggingFace's 10k file limit,
+    but we want all categorizations to map to the base directory name.
+
+    Examples:
+        behavioral_change/explicit1/file.yaml -> behavioral_change/explicit/file.yaml
+        behavioral_change/explicit2/file.yaml -> behavioral_change/explicit/file.yaml
+
+    Args:
+        relative_path: Relative path from rollouts directory
+
+    Returns:
+        Normalized path with numbered directories replaced by base directory
+    """
+    parts = list(relative_path.parts)
+
+    # Check each part for numbered suffix pattern (e.g., explicit1, ideal2)
+    for i, part in enumerate(parts):
+        # Match directory names ending with digits (e.g., explicit1, explicit2)
+        match = re.match(r'^(.+?)(\d+)$', part)
+        if match:
+            base_name = match.group(1)
+            # Replace with base name (remove number suffix)
+            parts[i] = base_name
+
+    return Path(*parts) if parts else relative_path
+
+
 async def extract_clean_reasoning_seed(
     response: str,
     max_sentences: int = None,
@@ -100,7 +130,10 @@ async def extract_clean_reasoning_seed(
         categorization_dir = Path('working/categorization') / model_dir
         rollouts_dir = config.ROLLOUTS_DIR / model_dir
 
-        categorization_file = categorization_dir / rollout_file.relative_to(rollouts_dir)
+        # Normalize path to handle numbered overflow directories (explicit1 -> explicit)
+        relative_path = rollout_file.relative_to(rollouts_dir)
+        normalized_path = normalize_numbered_directory_path(relative_path)
+        categorization_file = categorization_dir / normalized_path
 
         if not categorization_file.exists():
             raise FileNotFoundError(
