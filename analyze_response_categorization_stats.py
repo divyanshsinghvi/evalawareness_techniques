@@ -641,8 +641,8 @@ def export_high_awareness_bc_seeds(data, model_dir: str):
         if not bc_and_aware_seeds:
             continue
 
-        # Sort by eval awareness (descending), then by file_path (ascending) for deterministic ordering
-        bc_and_aware_seeds.sort(key=lambda x: (-x['evaluation']['awareness_intensity'], x['file_path']))
+        # Sort by eval awareness (descending), then by seed number (ascending) for deterministic ordering
+        bc_and_aware_seeds.sort(key=lambda x: (-x['evaluation']['awareness_intensity'], x['seed']))
 
         # Remove behavioral_change flag from output (it's implicit since we filtered)
         for seed in bc_and_aware_seeds:
@@ -860,10 +860,10 @@ def export_top3_high_awareness_bc_seeds(model_dir: str):
             # Get seeds (already sorted by eval awareness descending)
             all_seeds = prompt_info['seeds']
 
-            # Re-sort to ensure deterministic ordering: by eval awareness (descending), then by file_path (ascending)
+            # Re-sort to ensure deterministic ordering: by eval awareness (descending), then by seed number (ascending)
             all_seeds_sorted = sorted(
                 all_seeds,
-                key=lambda x: (-x['evaluation']['awareness_intensity'], x['file_path'])
+                key=lambda x: (-x['evaluation']['awareness_intensity'], x['seed'])
             )
 
             # Take top 3
