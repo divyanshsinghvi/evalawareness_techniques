@@ -20,6 +20,44 @@ import yaml
 import os
 
 
+def get_chat_markers(tokenizer: AutoTokenizer) -> Tuple[str, str]:
+    """
+    Get the user and system role markers based on the tokenizer type.
+    
+    Args:
+        tokenizer: The tokenizer to detect markers for
+        
+    Returns:
+        Tuple of (user_marker, system_marker)
+        
+    Raises:
+        RuntimeError: If tokenizer type is not supported (not Llama or Qwen)
+    """
+    # Check tokenizer name/class
+    tokenizer_name = tokenizer.__class__.__name__.lower()
+    
+    # Also check the name_or_path attribute if available
+    model_name = ""
+    if hasattr(tokenizer, 'name_or_path'):
+        model_name = tokenizer.name_or_path.lower()
+    
+    # Check for Llama
+    if 'llama' in tokenizer_name or 'llama' in model_name:
+        return "<|start_header_id|>user", "<|start_header_id|>system"
+    
+    # Check for Qwen
+    if 'qwen' in tokenizer_name or 'qwen' in model_name:
+        return "<|im_start|>user", "<|im_start|>system"
+    
+    # No supported tokenizer found
+    raise RuntimeError(
+        f"Unsupported tokenizer type. Only Llama and Qwen tokenizers are supported.\n"
+        f"Tokenizer class: {tokenizer.__class__.__name__}\n"
+        f"Model name/path: {getattr(tokenizer, 'name_or_path', 'unknown')}"
+    )
+
+
+
 
 def load_prompts_with_metadata(input_dir: str, mode: str, priority: str = "high_awareness_bc"):
     """
@@ -189,73 +227,64 @@ def create_user_token_mask(
     
     mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=formatted_tokens['input_ids'].device)
     
+    # Get the correct markers for this tokenizer
+    user_marker, _ = get_chat_markers(tokenizer)
+    
     for i, prompt in enumerate(prompt_batch):
         # Decode full sequence to get text
         full_text = tokenizer.decode(formatted_tokens['input_ids'][i], skip_special_tokens=False)
         
         # Find user content boundaries in text
-        # Look for the user marker in chat template
-        user_marker = "<|im_start|>user"
         marker_idx = full_text.find(user_marker)
         
         if marker_idx == -1:
-            # Try alternative markers
-            user_marker = "user\n"
-            marker_idx = full_text.find(user_marker)
+            raise RuntimeError(
+                f"Could not find user marker '{user_marker}' in formatted text for batch item {i}.\n"
+                f"This may indicate an issue with the chat template formatting."
+            )
         
         # Find where actual prompt content starts
-        if marker_idx != -1:
-            # Search for prompt text after the marker
-            search_after = marker_idx + len(user_marker)
-            # Use first 150 chars of prompt for matching
-            search_text = prompt[:min(150, len(prompt))].strip()
-            
-            # Find the prompt in the text
+        # Search for prompt text after the marker
+        search_after = marker_idx + len(user_marker)
+        # Use first 150 chars of prompt for matching
+        search_text = prompt[:min(150, len(prompt))].strip()
+        
+        # Find the prompt in the text
+        prompt_start_text = full_text.find(search_text, search_after)
+        
+        if prompt_start_text == -1:
+            # Try with first 50 chars
+            search_text = prompt[:min(50, len(prompt))].strip()
             prompt_start_text = full_text.find(search_text, search_after)
+        
+        if prompt_start_text != -1:
+            # Found it - now map to tokens
+            prompt_end_text = prompt_start_text + len(prompt)
             
-            if prompt_start_text == -1:
-                # Try with first 50 chars
-                search_text = prompt[:min(50, len(prompt))].strip()
-                prompt_start_text = full_text.find(search_text, search_after)
+            # Map text positions to token positions
+            token_start = None
+            token_end = None
             
-            if prompt_start_text != -1:
-                # Found it - now map to tokens
-                prompt_end_text = prompt_start_text + len(prompt)
+            for tok_idx in range(seq_len):
+                # Decode up to current token
+                decoded_so_far = tokenizer.decode(
+                    formatted_tokens['input_ids'][i][:tok_idx + 1],
+                    skip_special_tokens=False
+                )
                 
-                # Map text positions to token positions
-                token_start = None
-                token_end = None
+                # Check if we've reached prompt start
+                if token_start is None and len(decoded_so_far) >= prompt_start_text:
+                    token_start = max(0, tok_idx - 1)
                 
-                for tok_idx in range(seq_len):
-                    # Decode up to current token
-                    decoded_so_far = tokenizer.decode(
-                        formatted_tokens['input_ids'][i][:tok_idx + 1],
-                        skip_special_tokens=False
-                    )
-                    
-                    # Check if we've reached prompt start
-                    if token_start is None and len(decoded_so_far) >= prompt_start_text:
-                        token_start = max(0, tok_idx - 1)
-                    
-                    # Check if we've reached prompt end
-                    if token_start is not None and len(decoded_so_far) >= prompt_end_text:
-                        token_end = tok_idx + 1
-                        break
-                
-                if token_start is not None and token_end is not None:
-                    mask[i, token_start:token_end] = True
-                else:
-                    # Fallback: everything after marker
-                    for tok_idx in range(seq_len):
-                        decoded = tokenizer.decode(
-                            formatted_tokens['input_ids'][i][:tok_idx],
-                            skip_special_tokens=False
-                        )
-                        if len(decoded) >= marker_idx + len(user_marker):
-                            mask[i, tok_idx:] = True
-                            break
+                # Check if we've reached prompt end
+                if token_start is not None and len(decoded_so_far) >= prompt_end_text:
+                    token_end = tok_idx + 1
+                    break
+            
+            if token_start is not None and token_end is not None:
+                mask[i, token_start:token_end] = True
             else:
-                # Couldn't find prompt text - mask everything after marker
+                # Fallback: everything after marker
                 for tok_idx in range(seq_len):
                     decoded = tokenizer.decode(
                         formatted_tokens['input_ids'][i][:tok_idx],
@@ -265,9 +294,15 @@ def create_user_token_mask(
                         mask[i, tok_idx:] = True
                         break
         else:
-            # No marker - fallback to masking second half
-            print(f"Warning: No user marker found for batch item {i}, using fallback")
-            mask[i, seq_len//2:] = True
+            # Couldn't find prompt text - mask everything after marker
+            for tok_idx in range(seq_len):
+                decoded = tokenizer.decode(
+                    formatted_tokens['input_ids'][i][:tok_idx],
+                    skip_special_tokens=False
+                )
+                if len(decoded) >= marker_idx + len(user_marker):
+                    mask[i, tok_idx:] = True
+                    break
     
     return mask
 
@@ -296,6 +331,9 @@ def create_system_token_mask(
     
     mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=formatted_tokens['input_ids'].device)
     
+    # Get the correct markers for this tokenizer
+    _, system_marker = get_chat_markers(tokenizer)
+    
     # Process each item in batch
     for i in range(batch_size):
         # Get the system prompt for this batch item
@@ -312,69 +350,56 @@ def create_system_token_mask(
         full_text = tokenizer.decode(formatted_tokens['input_ids'][i], skip_special_tokens=False)
         
         # Find system content boundaries in text
-        # Look for the system marker in chat template
-        system_marker = "<|im_start|>system"
         marker_idx = full_text.find(system_marker)
         
         if marker_idx == -1:
-            # Try alternative markers
-            system_marker = "system\n"
-            marker_idx = full_text.find(system_marker)
+            raise RuntimeError(
+                f"Could not find system marker '{system_marker}' in formatted text for batch item {i}.\n"
+                f"This may indicate an issue with the chat template formatting."
+            )
         
         # Find where actual system prompt content starts
-        if marker_idx != -1:
-            # Search for system prompt text after the marker
-            search_after = marker_idx + len(system_marker)
-            # Use first 100 chars of system prompt for matching
-            search_text = system_prompt[:min(100, len(system_prompt))].strip()
-            
-            # Find the system prompt in the text
+        # Search for system prompt text after the marker
+        search_after = marker_idx + len(system_marker)
+        # Use first 100 chars of system prompt for matching
+        search_text = system_prompt[:min(100, len(system_prompt))].strip()
+        
+        # Find the system prompt in the text
+        sys_start_text = full_text.find(search_text, search_after)
+        
+        if sys_start_text == -1:
+            # Try with first 30 chars
+            search_text = system_prompt[:min(30, len(system_prompt))].strip()
             sys_start_text = full_text.find(search_text, search_after)
+        
+        if sys_start_text != -1:
+            # Found it - now map to tokens
+            sys_end_text = sys_start_text + len(system_prompt)
             
-            if sys_start_text == -1:
-                # Try with first 30 chars
-                search_text = system_prompt[:min(30, len(system_prompt))].strip()
-                sys_start_text = full_text.find(search_text, search_after)
+            # Map text positions to token positions
+            token_start = None
+            token_end = None
             
-            if sys_start_text != -1:
-                # Found it - now map to tokens
-                sys_end_text = sys_start_text + len(system_prompt)
+            for tok_idx in range(seq_len):
+                # Decode up to current token
+                decoded_so_far = tokenizer.decode(
+                    formatted_tokens['input_ids'][i][:tok_idx + 1],
+                    skip_special_tokens=False
+                )
                 
-                # Map text positions to token positions
-                token_start = None
-                token_end = None
+                # Check if we've reached system prompt start
+                if token_start is None and len(decoded_so_far) >= sys_start_text:
+                    token_start = max(0, tok_idx - 1)
                 
-                for tok_idx in range(seq_len):
-                    # Decode up to current token
-                    decoded_so_far = tokenizer.decode(
-                        formatted_tokens['input_ids'][i][:tok_idx + 1],
-                        skip_special_tokens=False
-                    )
-                    
-                    # Check if we've reached system prompt start
-                    if token_start is None and len(decoded_so_far) >= sys_start_text:
-                        token_start = max(0, tok_idx - 1)
-                    
-                    # Check if we've reached system prompt end
-                    if token_start is not None and len(decoded_so_far) >= sys_end_text:
-                        token_end = tok_idx + 1
-                        break
-                
-                if token_start is not None and token_end is not None:
-                    mask[i, token_start:token_end] = True
-                else:
-                    # Fallback: mask some tokens after marker
-                    for tok_idx in range(seq_len):
-                        decoded = tokenizer.decode(
-                            formatted_tokens['input_ids'][i][:tok_idx],
-                            skip_special_tokens=False
-                        )
-                        if len(decoded) >= marker_idx + len(system_marker):
-                            # Mask next 50 tokens as rough estimate
-                            mask[i, tok_idx:min(tok_idx + 50, seq_len)] = True
-                            break
+                # Check if we've reached system prompt end
+                if token_start is not None and len(decoded_so_far) >= sys_end_text:
+                    token_end = tok_idx + 1
+                    break
+            
+            if token_start is not None and token_end is not None:
+                mask[i, token_start:token_end] = True
             else:
-                # Couldn't find system prompt text - mask tokens after marker
+                # Fallback: mask some tokens after marker
                 for tok_idx in range(seq_len):
                     decoded = tokenizer.decode(
                         formatted_tokens['input_ids'][i][:tok_idx],
@@ -385,9 +410,16 @@ def create_system_token_mask(
                         mask[i, tok_idx:min(tok_idx + 50, seq_len)] = True
                         break
         else:
-            # No marker - fallback to masking beginning portion
-            print(f"Warning: No system marker found for batch item {i}, using fallback")
-            mask[i, :seq_len//4] = True
+            # Couldn't find system prompt text - mask tokens after marker
+            for tok_idx in range(seq_len):
+                decoded = tokenizer.decode(
+                    formatted_tokens['input_ids'][i][:tok_idx],
+                    skip_special_tokens=False
+                )
+                if len(decoded) >= marker_idx + len(system_marker):
+                    # Mask next 50 tokens as rough estimate
+                    mask[i, tok_idx:min(tok_idx + 50, seq_len)] = True
+                    break
     
     return mask
 

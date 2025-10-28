@@ -598,18 +598,20 @@ class PromptRollout:
 
         # Check if we need to use a numbered subdirectory
         # If base_output_dir has >9960 files, use numbered subdirectory (explicit1, explicit2, ...)
+        # Numbered directories are created at the SAME level as base_output_dir, not inside it
         output_dir = base_output_dir
 
         if base_output_dir.exists():
             file_count = len([f for f in base_output_dir.iterdir() if f.is_file()])
 
             if file_count >= MAX_FILES_PER_DIR:
-                # Find the next available numbered subdirectory
+                # Find the next available numbered subdirectory at parent level
                 dir_name = base_output_dir.name
+                parent_dir = base_output_dir.parent
                 counter = 1
 
                 while True:
-                    numbered_dir = base_output_dir / f"{dir_name}{counter}"
+                    numbered_dir = parent_dir / f"{dir_name}{counter}"
 
                     if not numbered_dir.exists():
                         # Use this new directory
@@ -941,25 +943,26 @@ async def process_single_rollout(runner: PromptRollout, filepath: Path, seed: in
     return result
 
 def rollout_exists_anywhere(base_output_dir: Path, filename: str) -> bool:
-    """Check if rollout exists in base directory or any numbered subdirectories.
+    """Check if rollout exists in base directory or any numbered subdirectories at parent level.
 
     Args:
         base_output_dir: Base output directory (e.g., rollouts/model/behavioral_change/explicit/)
         filename: Rollout filename (e.g., prompt_seed_0.yaml)
 
     Returns:
-        True if file exists in base_output_dir or any numbered subdirectories (explicit1, explicit2, ...)
+        True if file exists in base_output_dir or numbered sibling directories (explicit1, explicit2, ...)
     """
     # Check base directory
     if (base_output_dir / filename).exists():
         return True
 
-    # Check numbered subdirectories (explicit1, explicit2, ...)
+    # Check numbered subdirectories at parent level (explicit1, explicit2, ...)
     if base_output_dir.exists():
         dir_name = base_output_dir.name
+        parent_dir = base_output_dir.parent
         counter = 1
         while True:
-            numbered_dir = base_output_dir / f"{dir_name}{counter}"
+            numbered_dir = parent_dir / f"{dir_name}{counter}"
             if not numbered_dir.exists():
                 break
             if (numbered_dir / filename).exists():
