@@ -18,7 +18,7 @@ import yaml
 import argparse
 from pathlib import Path
 from collections import defaultdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 import re
 
 
@@ -88,7 +88,7 @@ def analyze_suppression_file(file_path: Path) -> Dict:
     return result
 
 
-def print_summary(results: List[Dict]):
+def print_summary(results: List[Dict], bucket_data: Optional[Dict] = None):
     """Print summary statistics."""
     if not results:
         print("No results to analyze")
@@ -132,6 +132,42 @@ def print_summary(results: List[Dict]):
 
     eval_flips = sum(1 for r in results if r['behavioral_change']['evaluation_flipped'])
     print(f"Behavioral changes (choice flips): {eval_flips} / {len(results)} ({eval_flips/len(results)*100:.1f}%)")
+
+    # Awareness type distribution
+    print(f"\nOriginal awareness type distribution:")
+    orig_type_counts = defaultdict(int)
+    for r in results:
+        orig_type_counts[r['evaluation']['original_type']] += 1
+    for atype, count in sorted(orig_type_counts.items(), key=lambda x: x[1], reverse=True):
+        pct = (count / len(results)) * 100
+        print(f"  {atype}: {count} ({pct:.1f}%)")
+
+    print(f"\nSuppressed awareness type distribution:")
+    supp_type_counts = defaultdict(int)
+    for r in results:
+        supp_type_counts[r['evaluation']['suppressed_type']] += 1
+    for atype, count in sorted(supp_type_counts.items(), key=lambda x: x[1], reverse=True):
+        pct = (count / len(results)) * 100
+        print(f"  {atype}: {count} ({pct:.1f}%)")
+
+    # Choice distribution
+    eval_orig_a = sum(1 for r in results if r['evaluation']['original_choice'] == 'A')
+    eval_orig_b = sum(1 for r in results if r['evaluation']['original_choice'] == 'B')
+    eval_orig_none = sum(1 for r in results if not r['evaluation']['original_choice'])
+
+    eval_supp_a = sum(1 for r in results if r['evaluation']['suppressed_choice'] == 'A')
+    eval_supp_b = sum(1 for r in results if r['evaluation']['suppressed_choice'] == 'B')
+    eval_supp_none = sum(1 for r in results if not r['evaluation']['suppressed_choice'])
+
+    print(f"\nChoice Distribution:")
+    print(f"  Original:   A={eval_orig_a}, B={eval_orig_b}, None={eval_orig_none}")
+    print(f"  Suppressed: A={eval_supp_a}, B={eval_supp_b}, None={eval_supp_none}")
+
+    # Show which direction flips went
+    if eval_flips > 0:
+        a_to_b = sum(1 for r in results if r['evaluation']['original_choice'] == 'A' and r['evaluation']['suppressed_choice'] == 'B')
+        b_to_a = sum(1 for r in results if r['evaluation']['original_choice'] == 'B' and r['evaluation']['suppressed_choice'] == 'A')
+        print(f"  Flips: A→B={a_to_b}, B→A={b_to_a}")
     print()
 
     # Suppression metrics
@@ -156,6 +192,46 @@ def print_summary(results: List[Dict]):
     else:
         print("No suppression metrics available")
 
+    # Per-bucket breakdown
+    if bucket_data:
+        print(f"{'='*80}")
+        print(f"BY AWARENESS BUCKET (from bucket file)")
+        print(f"{'='*80}")
+
+        # Extract all prompts from bucket data and map to bucket category
+        prompt_to_bucket = {}
+        buckets = bucket_data.get('eval_awareness_buckets', {})
+        for bucket_name, bucket_prompts in buckets.items():
+            for prompt_name in bucket_prompts.keys():
+                prompt_to_bucket[prompt_name] = bucket_name
+
+        # Group results by bucket
+        bucket_groups = defaultdict(list)
+        for r in results:
+            # Extract prompt name from source_file
+            # e.g., working/rollouts/model/behavioral_change/explicit/hallucination_2025-10-23_15-15-14_1b2eebd9_seed_0.yaml
+            source_file = r.get('source_file', '')
+            if source_file:
+                # Extract base name without seed
+                base_name = Path(source_file).stem  # hallucination_2025-10-23_15-15-14_1b2eebd9_seed_0
+                base_prompt = re.sub(r'_seed_\d+$', '', base_name)  # hallucination_2025-10-23_15-15-14_1b2eebd9
+
+                # Find which bucket this prompt belongs to
+                if base_prompt in prompt_to_bucket:
+                    bucket_name = prompt_to_bucket[base_prompt]
+                    bucket_groups[bucket_name].append(r)
+
+        # Sort buckets by their percentile range
+        bucket_order = ['10-25%', '25-50%', '50-75%', '75-100%']
+        for bucket_name in bucket_order:
+            if bucket_name in bucket_groups:
+                group = bucket_groups[bucket_name]
+                eval_orig_avg = sum(r['evaluation']['original_awareness'] for r in group) / len(group)
+                eval_supp_avg = sum(r['evaluation']['suppressed_awareness'] for r in group) / len(group)
+                reduction = eval_orig_avg - eval_supp_avg
+                reduction_pct = (reduction / eval_orig_avg * 100) if eval_orig_avg > 0 else 0
+                print(f"{bucket_name}: {len(group)} files, original={eval_orig_avg:.2f} → suppressed={eval_supp_avg:.2f} (reduction={reduction:.2f}, {reduction_pct:.1f}%)")
+
     print()
     print(f"{'='*80}")
 
@@ -164,6 +240,8 @@ def main():
     parser = argparse.ArgumentParser(description='Analyze suppression experiment results')
     parser.add_argument('--experiment-dir', type=str, required=True,
                        help='Directory containing suppression experiment outputs')
+    parser.add_argument('--bucket-file', type=str,
+                       help='Bucket file for per-prompt breakdown (e.g., working/response_categorization/model/high_awareness_bc_seeds.yaml)')
     parser.add_argument('--recursive', action='store_true',
                        help='Recursively search subdirectories')
     parser.add_argument('--output-csv', type=str,
@@ -197,8 +275,18 @@ def main():
         except Exception as e:
             print(f"Error processing {file_path.name}: {e}")
 
+    # Load bucket file if provided
+    bucket_data = None
+    if args.bucket_file:
+        bucket_path = Path(args.bucket_file)
+        if bucket_path.exists():
+            with open(bucket_path) as f:
+                bucket_data = yaml.safe_load(f)
+        else:
+            print(f"Warning: Bucket file not found: {bucket_path}")
+
     # Print summary
-    print_summary(results)
+    print_summary(results, bucket_data)
 
     # Save to CSV if requested
     if args.output_csv:
