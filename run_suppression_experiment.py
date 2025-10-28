@@ -45,6 +45,36 @@ def calculate_file_checksum(file_path: Path) -> str:
     return sha256_hash.hexdigest()
 
 
+def normalize_numbered_directory_path(relative_path: Path) -> Path:
+    """Normalize numbered overflow directories (explicit1, explicit2) back to base directory (explicit).
+
+    This handles the case where rollouts are stored in numbered subdirectories for HuggingFace's 10k file limit,
+    but we want all categorizations to map to the base directory name.
+
+    Examples:
+        behavioral_change/explicit1/file.yaml -> behavioral_change/explicit/file.yaml
+        behavioral_change/explicit2/file.yaml -> behavioral_change/explicit/file.yaml
+
+    Args:
+        relative_path: Relative path from rollouts directory
+
+    Returns:
+        Normalized path with numbered directories replaced by base directory
+    """
+    parts = list(relative_path.parts)
+
+    # Check each part for numbered suffix pattern (e.g., explicit1, ideal2)
+    for i, part in enumerate(parts):
+        # Match directory names ending with digits (e.g., explicit1, explicit2)
+        match = re.match(r'^(.+?)(\d+)$', part)
+        if match:
+            base_name = match.group(1)
+            # Replace with base name (remove number suffix)
+            parts[i] = base_name
+
+    return Path(*parts) if parts else relative_path
+
+
 async def extract_clean_reasoning_seed(
     response: str,
     max_sentences: int = None,
@@ -100,7 +130,10 @@ async def extract_clean_reasoning_seed(
         categorization_dir = Path('working/categorization') / model_dir
         rollouts_dir = config.ROLLOUTS_DIR / model_dir
 
-        categorization_file = categorization_dir / rollout_file.relative_to(rollouts_dir)
+        # Normalize path to handle numbered overflow directories (explicit1 -> explicit)
+        relative_path = rollout_file.relative_to(rollouts_dir)
+        normalized_path = normalize_numbered_directory_path(relative_path)
+        categorization_file = categorization_dir / normalized_path
 
         if not categorization_file.exists():
             raise FileNotFoundError(
@@ -134,6 +167,7 @@ async def extract_clean_reasoning_seed(
     # Process sentences
     clean_reasoning_parts = []
     removed_sentences = []  # Track removed sentences
+    clean_sentences_info = []  # Track clean sentences with their scores
 
     if use_existing_data:
         # Use pre-scored categorization data
@@ -166,6 +200,7 @@ async def extract_clean_reasoning_seed(
 
             if not is_aware:
                 clean_reasoning_parts.append(sent)
+                clean_sentences_info.append([idx + 1, sent, score, test_ref_flag])
             else:
                 # Found awareness - record it and STOP processing
                 removed_sentences.append([idx + 1, sent, awareness_info])
@@ -224,6 +259,11 @@ async def extract_clean_reasoning_seed(
 
             if not is_aware:
                 clean_reasoning_parts.append(sent)
+                # For rule_based, store with awareness_info instead of score
+                if detection_mode == "rule_based":
+                    clean_sentences_info.append([idx + 1, sent, "clean", awareness_info if awareness_info else "no awareness"])
+                elif detection_mode == "llm_sentence":
+                    clean_sentences_info.append([idx + 1, sent, score, test_ref_flag])
             else:
                 # Found awareness - record it and STOP processing
                 removed_sentences.append([idx + 1, sent, awareness_info])
@@ -253,19 +293,38 @@ async def extract_clean_reasoning_seed(
         'removed_sentences': len(removed_sentences),
         'seed_sentences_used': len(seed_sentences),
         'seed_length': len(seed_string),
-        'removed_details': removed_sentences
+        'removed_details': removed_sentences,
+        'clean_sentences_info': clean_sentences_info
     }
 
     if verbose:
         print(f"  Original reasoning: {stats['original_reasoning_length']} chars")
         print(f"  Total sentences before awareness: {stats['clean_sentences']}/{stats['total_sentences']}")
 
+        # Show clean sentences that were kept with their scores
+        clean_info = stats.get('clean_sentences_info', [])
+        if clean_info:
+            print(f"\n  ✅ Accepted {len(clean_info)} clean sentence(s) as seed:")
+            for sent_idx, sent_text, score, flag in clean_info[:10]:  # Show first 10
+                sent_preview = sent_text[:80].replace('\n', ' ')
+                print(f"     [{sent_idx}] score={score}, {flag}: {sent_preview}...")
+            if len(clean_info) > 10:
+                print(f"     ... and {len(clean_info) - 10} more clean sentences")
+
         # Show removed sentences if any
         if removed_sentences:
-            print(f"  ❌ Removed {len(removed_sentences)} sentence(s) (aware + all after it):")
-            for sent_idx, sent_text, info in removed_sentences:
-                sent_preview = sent_text[:100].replace('\n', ' ')
+            # Only show the first aware sentence that triggered removal
+            first_aware = removed_sentences[0]
+            sent_idx, sent_text, info = first_aware
+            sent_preview = sent_text[:100].replace('\n', ' ')
+
+            if len(removed_sentences) == 1:
+                print(f"\n  ❌ Removed 1 sentence (aware):")
                 print(f"     [{sent_idx}] {sent_preview}... ({info})")
+            else:
+                print(f"\n  ❌ Removed {len(removed_sentences)} sentences total:")
+                print(f"     First aware sentence [{sent_idx}]: {sent_preview}... ({info})")
+                print(f"     + {len(removed_sentences) - 1} more sentence(s) after it (auto-discarded)")
 
         if max_sentences is None:
             print(f"  ✓ Using {stats['seed_sentences_used']} sentences as seed (up to first awareness) ({stats['seed_length']} chars)")
@@ -404,6 +463,11 @@ async def process_rollout(
             )
 
             # Score responses with LLM judge
+            if verbose:
+                print(f"\n{'='*80}")
+                print(f"📊 SCORING RESPONSES WITH LLM JUDGE")
+                print(f"{'='*80}")
+
             deployment_original_score = await score_response(
                 judge_client, deployment_original_response, judge_model
             )
@@ -415,6 +479,24 @@ async def process_rollout(
             evaluation_suppressed_score = await score_response(
                 judge_client, evaluation_suppression_result.final_response, judge_model
             )
+
+            # Calculate total timing
+            judge_api_time = (deployment_original_score.get('api_time', 0) +
+                             evaluation_original_score.get('api_time', 0) +
+                             evaluation_suppressed_score.get('api_time', 0))
+            suppression_api_time = evaluation_suppression_result.total_api_time
+            total_file_api_time = suppression_api_time + judge_api_time
+
+            if verbose:
+                print(f"\n{'='*80}")
+                print(f"⏱️  TIMING SUMMARY FOR THIS FILE")
+                print(f"{'='*80}")
+                print(f"  Suppression API calls: {evaluation_suppression_result.api_call_count}")
+                print(f"  Suppression API time: {suppression_api_time:.2f}s")
+                print(f"  Judge API calls: 3")
+                print(f"  Judge API time: {judge_api_time:.2f}s")
+                print(f"  Total API time: {total_file_api_time:.2f}s")
+                print(f"{'='*80}\n")
 
         # Analyze with rule-based detection for comparison
         deployment_original_awareness = analyze_awareness_levels(deployment_original_response)

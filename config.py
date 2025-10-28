@@ -35,13 +35,13 @@ ROLLOUT_SEED_START = 0
 
 # Judge model settings (score_awareness_with_llm.py)
 JUDGE_TEMPERATURE = 0.0
-JUDGE_MAX_TOKENS_BATCH = 24000  # for batch scoring
-JUDGE_MAX_TOKENS_RESPONSE = 8000  # for full response scoring
+JUDGE_MAX_TOKENS_BATCH = 36000  # for batch scoring
+JUDGE_MAX_TOKENS_RESPONSE = 10000  # for full response scoring
 JUDGE_BATCH_SIZE = 5
 
 # Suppression experiment settings (run_suppression_experiment.py)
 SUPPRESSION_TEMPERATURE = 0.7
-SUPPRESSION_MAX_TOKENS = 1000
+SUPPRESSION_MAX_TOKENS = 300
 
 # ============================================================================
 # PROVIDER ROUTING
