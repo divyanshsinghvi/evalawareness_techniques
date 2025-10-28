@@ -617,6 +617,7 @@ def main():
         attn_implementation="flash_attention_2",
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    tokenizer.padding_side = "left"
 
     # Wrap with nnsight
     nnmodel = LanguageModel(model, tokenizer=tokenizer)
