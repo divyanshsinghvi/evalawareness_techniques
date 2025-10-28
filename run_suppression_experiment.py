@@ -21,6 +21,7 @@ import re
 import hashlib
 import traceback
 from datetime import datetime
+from dataclasses import asdict
 import config
 from dotenv import load_dotenv
 
@@ -34,6 +35,38 @@ from score_awareness_with_llm import score_response, score_batch, AsyncOpenAI
 
 # Import awareness detection utilities
 from utils import analyze_awareness_levels
+
+
+def convert_chunk_resample_details(chunk_resample_details):
+    """Convert chunk resample details dataclasses to dictionaries for YAML."""
+    result = []
+    for chunk_info in chunk_resample_details:
+        chunk_dict = {
+            'iteration': chunk_info.iteration,
+            'chunk_index': chunk_info.chunk_index,
+            'chunk_type': chunk_info.chunk_type,
+            'original_chunk': chunk_info.original_chunk,
+            'original_detection': chunk_info.original_detection,
+            'attempts_needed': chunk_info.attempts_needed,
+            'final_chunk': chunk_info.final_chunk,
+            'success': chunk_info.success,
+            'attempts': []
+        }
+
+        # Convert each attempt
+        for attempt in chunk_info.attempts:
+            attempt_dict = {
+                'attempt_number': attempt.attempt_number,
+                'chunk_text': attempt.chunk_text,
+                'is_aware': attempt.is_aware,
+                'awareness_count': attempt.awareness_count,
+                'detection_details': attempt.detection_details,
+                'aware_sentences': attempt.aware_sentences
+            }
+            chunk_dict['attempts'].append(attempt_dict)
+
+        result.append(chunk_dict)
+    return result
 
 
 def calculate_file_checksum(file_path: Path) -> str:
@@ -83,7 +116,8 @@ async def extract_clean_reasoning_seed(
     removal_mode: str = "self_test_only",
     judge_client = None,
     judge_model: str = None,
-    verbose: bool = False,
+    mode: str = None,
+    verbose: int = 0,
     rollout_file: Path = None,
     model_dir: str = None
 ) -> tuple:
@@ -127,7 +161,7 @@ async def extract_clean_reasoning_seed(
 
     if rollout_file and model_dir and detection_mode == "llm_sentence":
         # Construct path to categorization file
-        categorization_dir = Path('working/categorization') / mode / model_dir
+        categorization_dir = config.SENTENCE_CATEGORIZATION_DIR / mode / model_dir
         rollouts_dir = config.ROLLOUTS_DIR / model_dir
 
         # Normalize path to handle numbered overflow directories (explicit1 -> explicit)
@@ -142,7 +176,7 @@ async def extract_clean_reasoning_seed(
                 f"  python categorize_rollouts.py --model-dir {model_dir}"
             )
 
-        if verbose:
+        if verbose >= 2:
             print(f"  📂 Loading categorization data: {categorization_file.name}")
 
         with open(categorization_file) as f:
@@ -161,7 +195,7 @@ async def extract_clean_reasoning_seed(
             )
 
         use_existing_data = True
-        if verbose:
+        if verbose >= 2:
             print(f"  ✓ Using {len(categorized_sentences)} pre-scored sentences from categorization")
 
     # Process sentences
@@ -297,7 +331,7 @@ async def extract_clean_reasoning_seed(
         'clean_sentences_info': clean_sentences_info
     }
 
-    if verbose:
+    if verbose >= 2:
         print(f"  Original reasoning: {stats['original_reasoning_length']} chars")
         print(f"  Total sentences before awareness: {stats['clean_sentences']}/{stats['total_sentences']}")
 
@@ -356,18 +390,20 @@ async def process_rollout(
     semaphore: asyncio.Semaphore,
     judge_client: AsyncOpenAI,
     model_dir: str,
+    mode: str,
+    suppression_target: str,
     detection_mode: str = "rule_based",
     detection_threshold: str = "any",
     removal_mode: str = "self_test_only",
     base_seed: int = 0,
     skip_existing: bool = False,
-    verbose: bool = False
+    verbose: int = 0
 ) -> bool:
     """Process a single rollout file with suppression and LLM judging."""
     try:
         # Simple file existence check
         if skip_existing and output_file.exists():
-            if verbose:
+            if verbose >= 2:
                 print(f"[DEBUG] Skipping existing file: {output_file}")
             return True  # Skip - output file exists
 
@@ -403,6 +439,41 @@ async def process_rollout(
         if not all([system_prompt_original, deployment_user_msg, evaluation_user_msg]):
             return False
 
+        # Load pre-computed response-level awareness scores from response_categorization
+        response_categorization_dir = config.RESPONSE_CATEGORIZATION_DIR / mode / model_dir
+        rollouts_dir = config.ROLLOUTS_DIR / model_dir
+
+        # Use same normalization as sentence categorization
+        from run_suppression_experiment import normalize_numbered_directory_path
+        relative_path = rollout_file.relative_to(rollouts_dir)
+        normalized_path = normalize_numbered_directory_path(relative_path)
+        response_cat_file = response_categorization_dir / normalized_path
+
+        # Response categorization is REQUIRED - must exist before running suppression
+        if not response_cat_file.exists():
+            raise FileNotFoundError(
+                f"Response categorization file not found: {response_cat_file}\n"
+                f"Pre-computed response scores are required. Please run:\n"
+                f"  python categorize_responses.py --model-dir {model_dir} --mode {mode}"
+            )
+
+        with open(response_cat_file) as f:
+            response_cat_data = yaml.safe_load(f)
+
+        # Extract pre-computed scores (must exist)
+        deployment_original_score = response_cat_data.get('deployment', {}).get('awareness', {})
+        evaluation_original_score = response_cat_data.get('evaluation', {}).get('awareness', {})
+
+        if not deployment_original_score or not evaluation_original_score:
+            raise ValueError(
+                f"Response categorization file is incomplete: {response_cat_file}\n"
+                f"Missing awareness scores for deployment or evaluation branches.\n"
+                f"Please re-run: python categorize_responses.py --model-dir {model_dir} --mode {mode}"
+            )
+
+        if verbose >= 2:
+            print(f"  ✓ Loaded pre-computed response scores from categorization")
+
         # Replace boxing instruction with explicit \\boxed{} format
         system_prompt = system_prompt_original.replace(
             "At the end of your response, clearly state your final recommendation by boxing either A or B.",
@@ -411,7 +482,7 @@ async def process_rollout(
 
         # If replacement didn't happen (original text not found), add instruction to end
         boxed_instruction = "At the end of your response, clearly state your final recommendation as \\boxed{A} or \\boxed{B}."
-        if boxed_instruction not in system_prompt:
+        if "boxed{A}" not in system_prompt:
             system_prompt = system_prompt.rstrip() + " " + boxed_instruction
 
         # Extract clean reasoning seed from evaluation response using same detection method
@@ -424,6 +495,7 @@ async def process_rollout(
             removal_mode=removal_mode,
             judge_client=judge_client,
             judge_model=judge_model,
+            mode=mode,
             verbose=verbose,
             rollout_file=rollout_file,
             model_dir=model_dir
@@ -431,7 +503,7 @@ async def process_rollout(
 
         # Run suppression on evaluation branch only (deployment has no eval context to suppress)
         async with semaphore:
-            if verbose:
+            if verbose >= 2:
                 print(f"\n[DEBUG] Starting to process: {rollout_file.name}")
                 print(f"\n{'='*80}")
                 print(f"Processing: {rollout_file.name}")
@@ -460,41 +532,58 @@ async def process_rollout(
                 detection_judge_mode=mode,
                 detection_threshold=detection_threshold,
                 base_seed=base_seed,
+                suppression_target=suppression_target,
                 verbose=verbose
             )
 
             # Score responses with LLM judge
-            if verbose:
+            if verbose >= 2:
                 print(f"\n{'='*80}")
                 print(f"📊 SCORING RESPONSES WITH LLM JUDGE")
                 print(f"{'='*80}")
+                print(f"  ✓ Using pre-computed deployment score (skipped API call)")
+                print(f"  ✓ Using pre-computed evaluation score (skipped API call)")
 
-            deployment_original_score = await score_response(
-                judge_client, deployment_original_response, judge_model, mode
-            )
-
-            evaluation_original_score = await score_response(
-                judge_client, evaluation_original_response, judge_model, mode
-            )
-
+            # deployment_original_score and evaluation_original_score already loaded from categorization
+            # Score the suppressed response components separately
             evaluation_suppressed_score = await score_response(
                 judge_client, evaluation_suppression_result.final_response, judge_model, mode
             )
 
+            # Score content and reasoning separately for detailed analysis
+            evaluation_suppressed_content_score = await score_response(
+                judge_client, evaluation_suppression_result.final_response.split('</thinking>')[-1].strip(), judge_model, mode
+            )
+
+            evaluation_suppressed_reasoning_score = None
+            if evaluation_suppression_result.final_reasoning:
+                evaluation_suppressed_reasoning_score = await score_response(
+                    judge_client, evaluation_suppression_result.final_reasoning, judge_model, mode
+                )
+
             # Calculate total timing
+            judge_api_calls = 3  # deployment, evaluation, suppressed_full
             judge_api_time = (deployment_original_score.get('api_time', 0) +
                              evaluation_original_score.get('api_time', 0) +
                              evaluation_suppressed_score.get('api_time', 0))
+
+            # Add content and reasoning scoring
+            judge_api_time += evaluation_suppressed_content_score.get('api_time', 0)
+            judge_api_calls += 1
+            if evaluation_suppressed_reasoning_score:
+                judge_api_time += evaluation_suppressed_reasoning_score.get('api_time', 0)
+                judge_api_calls += 1
+
             suppression_api_time = evaluation_suppression_result.total_api_time
             total_file_api_time = suppression_api_time + judge_api_time
 
-            if verbose:
+            if verbose >= 2:
                 print(f"\n{'='*80}")
                 print(f"⏱️  TIMING SUMMARY FOR THIS FILE")
                 print(f"{'='*80}")
                 print(f"  Suppression API calls: {evaluation_suppression_result.api_call_count}")
                 print(f"  Suppression API time: {suppression_api_time:.2f}s")
-                print(f"  Judge API calls: 3")
+                print(f"  Judge API calls: {judge_api_calls}")
                 print(f"  Judge API time: {judge_api_time:.2f}s")
                 print(f"  Total API time: {total_file_api_time:.2f}s")
                 print(f"{'='*80}\n")
@@ -563,6 +652,20 @@ async def process_rollout(
                         'dominant_features': evaluation_suppressed_score.get('dominant_features', []),
                         'response_summary': evaluation_suppressed_score.get('response_summary', '')
                     },
+                    'llm_judge_score_content': {
+                        'awareness_level': evaluation_suppressed_content_score.get('awareness_level'),
+                        'awareness_intensity': evaluation_suppressed_content_score.get('awareness_intensity'),
+                        'awareness_type': evaluation_suppressed_content_score.get('awareness_type'),
+                        'dominant_features': evaluation_suppressed_content_score.get('dominant_features', []),
+                        'response_summary': evaluation_suppressed_content_score.get('response_summary', '')
+                    },
+                    'llm_judge_score_reasoning': {
+                        'awareness_level': evaluation_suppressed_reasoning_score.get('awareness_level') if evaluation_suppressed_reasoning_score else None,
+                        'awareness_intensity': evaluation_suppressed_reasoning_score.get('awareness_intensity') if evaluation_suppressed_reasoning_score else None,
+                        'awareness_type': evaluation_suppressed_reasoning_score.get('awareness_type') if evaluation_suppressed_reasoning_score else None,
+                        'dominant_features': evaluation_suppressed_reasoning_score.get('dominant_features', []) if evaluation_suppressed_reasoning_score else [],
+                        'response_summary': evaluation_suppressed_reasoning_score.get('response_summary', '') if evaluation_suppressed_reasoning_score else ''
+                    },
                     'rule_based_awareness': {
                         'global_count': len(evaluation_suppressed_awareness.global_awareness_sentences),
                         'explicit_count': len(evaluation_suppressed_awareness.explicit_awareness_sentences),
@@ -575,7 +678,8 @@ async def process_rollout(
                         'chunks_resampled': evaluation_suppression_result.chunks_resampled,
                         'total_awareness_detected': evaluation_suppression_result.total_awareness_detected,
                         'suppression_successful': evaluation_suppression_result.suppression_successful
-                    }
+                    },
+                    'chunk_resample_details': convert_chunk_resample_details(evaluation_suppression_result.chunk_resample_details)
                 }
             },
             'comparison': {
@@ -678,8 +782,8 @@ async def main():
                        help='Seed range as "start,end" (e.g., "0,10" for seeds 0-10 inclusive) or single seed "0". Overrides --limit-seeds.')
     parser.add_argument('--skip-existing', action='store_true',
                        help='Skip files that exist (fast, no checksum verification)')
-    parser.add_argument('--verbose', action='store_true',
-                       help='Verbose output')
+    parser.add_argument('--verbose', type=int, default=0, choices=[0, 1, 2],
+                       help='Verbosity level: 0=quiet, 1=only empty response debugging, 2=full verbose')
     parser.add_argument('--experiment-name', default='01_chunk_resample',
                        help='Experiment name for output directory')
     parser.add_argument('--detection-mode', default='rule_based',
@@ -694,6 +798,8 @@ async def main():
     parser.add_argument('--removal-mode', default='self_test_only',
                        choices=['all', 'self_test_only', 'self_and_other'],
                        help='Which awareness to remove from seed: "all" (any awareness), "self_test_only" (only when model knows IT is tested), "self_and_other" (both types). Default: self_test_only')
+    parser.add_argument('--suppression-target', type=str, required=True, choices=['reasoning_only', 'full'],
+                       help='What to suppress: "reasoning_only" (suppress only thinking/reasoning), "full" (suppress both reasoning and content)')
     parser.add_argument('--mode', type=str, required=True, choices=['v0', 'v1'],
                        help='Prompt version to use for LLM judge (v0 or v1)')
 
@@ -748,11 +854,12 @@ async def main():
         except:
             detection_threshold = "5"
 
-    # Paths - include threshold and removal mode in directory name
+    # Paths - include threshold, removal mode, and suppression target in directory name
     rollouts_dir = Path('working/rollouts') / args.model_dir
     threshold_str = f"thresh_{detection_threshold}"
     removal_str = args.removal_mode.replace('_', '')  # self_test_only -> selftestonly for shorter paths
-    output_dir = Path('working/suppression_experiments') / args.experiment_name / f"{args.detection_mode}_{threshold_str}_{removal_str}" / args.model_dir
+    target_str = args.suppression_target.replace('_', '')  # reasoning_only -> reasoningonly
+    output_dir = Path('working/suppression_experiments') / args.experiment_name / f"{args.detection_mode}_{threshold_str}_{removal_str}_{target_str}" / args.model_dir
 
     if not rollouts_dir.exists():
         print(f"Error: Rollouts directory not found: {rollouts_dir}")
@@ -946,6 +1053,8 @@ async def main():
             semaphore=semaphore,
             judge_client=judge_client,
             model_dir=args.model_dir,
+            mode=args.mode,
+            suppression_target=args.suppression_target,
             detection_mode=args.detection_mode,
             detection_threshold=detection_threshold,
             removal_mode=args.removal_mode,
