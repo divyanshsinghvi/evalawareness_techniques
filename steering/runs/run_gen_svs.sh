@@ -18,16 +18,16 @@ echo "Project root: $PROJECT_ROOT"
 echo ""
 
 # Configuration
-MODEL_NAME="qwen_qwen3-32b"
-EVAL_DIR="/pscratch/sd/r/ritesh11/temp/steering_experiments/qwen3-32B/qwen32-anthropic-modelacts/eval"
-DEPLOY_DIR="/pscratch/sd/r/ritesh11/temp/steering_experiments/qwen3-32B/qwen32-anthropic-modelacts/deploy"
+MODEL_NAME="nvidia_llama-3.3-nemotron-super-49b-v1.5"
+EVAL_DIR="/pscratch/sd/r/ritesh11/temp/steering_experiments/nemotron-49B/nemo-anthropic-modelacts/eval"
+DEPLOY_DIR="/pscratch/sd/r/ritesh11/temp/steering_experiments/nemotron-49B/nemo-anthropic-modelacts/deploy"
 BASE_OUTPUT_DIR="/pscratch/sd/r/ritesh11/temp/working/steering-vecs"
 CATEGORY="anthropic"  # or "anthropic"
 
 # Layer range - choose one or define custom
 # Specific range
-START_LAYER=5
-END_LAYER=21
+START_LAYER=9
+END_LAYER=31
 
 # Alternative: Middle layers only (uncomment to use)
 # START_LAYER=20

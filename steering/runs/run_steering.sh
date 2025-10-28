@@ -6,7 +6,7 @@ set -euo pipefail  # Exit on error, undefined vars, and pipe failures
 
 # Get the script directory and project root
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Change to project root for consistent paths
 cd "$PROJECT_ROOT"
@@ -19,17 +19,17 @@ echo ""
 
 # Set up model and paths
 MODEL="qwen_qwen3-30b-a3b-thinking-2507"
-MODEL_PATH="/pscratch/sd/r/ritesh11/temp/models/Qwen3-30B-A3B-Thinking-2507"
-
-# Base directories (script will construct full paths automatically)
-BASE_PROMPTS_DIR="/pscratch/sd/r/ritesh11/temp/working/steer_formatted_prompts"  # Will use: BASE_PROMPTS_DIR/MODEL
-BASE_OUTPUT_DIR="/pscratch/sd/r/ritesh11/temp/working/steered-outs"              # Will create: BASE_OUTPUT_DIR/MODEL/PRIORITY/VEC_TYPE/MODE
-STEERING_VEC_DIR="/pscratch/sd/r/ritesh11/temp/working/steering-vecs/qwen_qwen-3-30b-a3b-thinking-2507/tim"
+MODEL_PATH="/workspace/Qwen3-30B-A3B-Thinking-2507"
 
 # Configuration
 MODE="eval"  # or "deploy"
 PRIORITY="high_awareness_bc"
 VEC_TYPE="tim"  # or your vector type
+
+# Base directories (script will construct full paths automatically)
+BASE_PROMPTS_DIR="/workspace/working/steer_formatted_prompts"  # Will use: BASE_PROMPTS_DIR/MODEL
+BASE_OUTPUT_DIR="/workspace/working/steered-outs"              # Will create: BASE_OUTPUT_DIR/MODEL/PRIORITY/VEC_TYPE/MODE
+STEERING_VEC_DIR="/workspace/working/steering-vecs/$MODEL/$VEC_TYPE"
 
 # Model dimensions (adjust based on your model)
 D_MODEL=2048
@@ -48,13 +48,13 @@ TOP_P=1
 DTYPE="bfloat16"
 
 # Seed(s) - can be single or multiple
-SEEDS=(42)
+# SEEDS=(42)
 
 # Multiple seeds for robustness (uncomment to use)
 # SEEDS=(42 43 44 45 46)
 
 # Many seeds for statistical analysis (uncomment to use)
-# SEEDS=($(seq 1 10))  # Seeds 1 through 10
+SEEDS=($(seq 0 30))  # Seeds 1 through 10
 
 # Steering parameters
 LAYER_RANGE=(5 20)  # First and last layer to consider
@@ -91,7 +91,7 @@ echo "  Output: $FULL_OUTPUT_DIR/N{n}_S{s}/"
 echo ""
 
 # Build the base command
-python3 evalawareness_techniques/steering/steer_model.py \
+python steer_model.py \
   --model "$MODEL" \
   --model_path "$MODEL_PATH" \
   --vec_type "$VEC_TYPE" \
