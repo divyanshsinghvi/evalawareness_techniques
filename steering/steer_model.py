@@ -112,7 +112,8 @@ def steer_and_generate(
     indices_to_process = []
     for idx, (source_file, checksum) in enumerate(zip(source_files, checksums)):
         # Create output filename based on source file with seed
-        base_name = os.path.splitext(source_file)[0]
+        # Use basename to match save logic
+        base_name = os.path.splitext(os.path.basename(source_file))[0]
         out_filename = f"{base_name}_seed_{seed}_steer_out.yaml"
         out_path = os.path.join(resdir, out_filename)
         
@@ -481,7 +482,6 @@ def steer_and_generate(
                     
                     # Create output filename based on source file with seed
                     base_name = os.path.splitext(os.path.basename(source_file))[0]
-                    # base_name = os.path.splitext(source_file)[0]
                     out_filename = f"{base_name}_seed_{seed}_steer_out.yaml"
                     out_path = os.path.join(resdir, out_filename)
                     
@@ -522,7 +522,7 @@ def main():
 
     # === Data Type & Randomness ===
     parser.add_argument('--dtype', type=str, default='bfloat16', choices=['bfloat16', 'float16', 'float32'])
-    parser.add_argument('--seed', type=int, default=42, help='Random seed for generation')
+    parser.add_argument('--seed', type=int, nargs='+', default=[42], help='Random seed(s) for generation (can provide multiple)')
 
     # === Generation Settings ===
     parser.add_argument('--batch_size', type=int, default=64)
@@ -560,6 +560,7 @@ def main():
     layer_range = (args.layer_range[0], args.layer_range[1])
     num_layers = args.num_layers
     strength = args.strength
+    seeds = args.seed if isinstance(args.seed, list) else [args.seed]
 
     # Print configuration
     print("\n" + "="*60)
@@ -586,7 +587,7 @@ def main():
     print(f"  - Max new tokens: {args.max_new_tokens}")
     print(f"  - Temperature: {args.temperature}")
     print(f"  - Top-p: {args.top_p}")
-    print(f"  - Seed: {args.seed}")
+    print(f"  - Seeds: {seeds}")
     print(f"\nPaths:")
     print(f"  - Base output dir: {args.out_dir}")
     print(f"  - Full output dir: {full_out_dir}")
@@ -594,10 +595,6 @@ def main():
     print(f"  - Base prompts dir: {args.prompts_dir}")
     print(f"  - Full prompts dir: {full_prompts_dir}")
     print("="*60 + "\n")
-
-    # Set random seed
-    set_seed(args.seed)
-    print(f"Set random seed to: {args.seed}\n")
 
     # Set dtype
     if args.dtype == "bfloat16":
@@ -627,55 +624,62 @@ def main():
 
     # Run steering
     with torch.no_grad():
-        # Run steering for each configuration
-        for n in num_layers:
-            for s in strength:
-                print(f"\n{'='*60}")
-                print(f"Running configuration: N={n}, S={s}")
-                print(f"{'='*60}\n")
-                
-                layers, multiplier = calculate_steering_params(layer_range, n, s)
-                
-                print(f"Layers to steer: {layers}")
-                print(f"Per-layer multiplier: {multiplier:.4f}")
+        # Run steering for each configuration (seed, num_layers, strength)
+        for seed in seeds:
+            # Set random seed for this iteration
+            set_seed(seed)
+            print(f"\n{'='*60}")
+            print(f"Set random seed to: {seed}")
+            print(f"{'='*60}\n")
+            
+            for n in num_layers:
+                for s in strength:
+                    print(f"\n{'='*60}")
+                    print(f"Running configuration: Seed={seed}, N={n}, S={s}")
+                    print(f"{'='*60}\n")
+                    
+                    layers, multiplier = calculate_steering_params(layer_range, n, s)
+                    
+                    print(f"Layers to steer: {layers}")
+                    print(f"Per-layer multiplier: {multiplier:.4f}")
 
-                if args.mode == 'eval':
-                    assert multiplier > 0
-                elif args.mode == 'deploy':
-                    assert multiplier < 0
+                    if args.mode == 'eval':
+                        assert multiplier > 0
+                    elif args.mode == 'deploy':
+                        assert multiplier < 0
 
-                steering_vecs = load_steering_vectors_from_npy(
-                    layers, multiplier=multiplier,
-                    steering_dir=args.steering_vec_dir,
-                    d_model=args.d_model,
-                    model_len=args.model_len
-                )
+                    steering_vecs = load_steering_vectors_from_npy(
+                        layers, multiplier=multiplier,
+                        steering_dir=args.steering_vec_dir,
+                        d_model=args.d_model,
+                        model_len=args.model_len
+                    )
 
-                # Create results directory with layer/strength config
-                config_resdir = os.path.join(full_out_dir, f"N{n}_S{s}")
-                print(f"Results directory: {config_resdir}")
+                    # Create results directory with layer/strength config
+                    config_resdir = os.path.join(full_out_dir, f"N{n}_S{s}")
+                    print(f"Results directory: {config_resdir}")
 
-                ans = steer_and_generate(
-                    prompt_list=user_prompts,
-                    system_prompt=sys_prompts,
-                    lma=nnmodel,
-                    tokenizer=tokenizer,
-                    steering_vectors=steering_vecs,
-                    layer_to_steer=layers,
-                    batch_size=args.batch_size,
-                    max_new_tokens=args.max_new_tokens,
-                    temperature=args.temperature,
-                    d_model=args.d_model,
-                    steer_on_user=args.steer_on_user,
-                    steer_on_thinking=args.steer_on_thinking,
-                    steer_on_system=args.steer_on_system,
-                    top_p=args.top_p,
-                    resdir=config_resdir,
-                    source_files=sources,
-                    checksums=checksums,
-                    buckets=buckets,
-                    seed=args.seed,
-                )
+                    ans = steer_and_generate(
+                        prompt_list=user_prompts,
+                        system_prompt=sys_prompts,
+                        lma=nnmodel,
+                        tokenizer=tokenizer,
+                        steering_vectors=steering_vecs,
+                        layer_to_steer=layers,
+                        batch_size=args.batch_size,
+                        max_new_tokens=args.max_new_tokens,
+                        temperature=args.temperature,
+                        d_model=args.d_model,
+                        steer_on_user=args.steer_on_user,
+                        steer_on_thinking=args.steer_on_thinking,
+                        steer_on_system=args.steer_on_system,
+                        top_p=args.top_p,
+                        resdir=config_resdir,
+                        source_files=sources,
+                        checksums=checksums,
+                        buckets=buckets,
+                        seed=seed,
+                    )
 
 
 if __name__ == "__main__":
