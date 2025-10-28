@@ -183,6 +183,7 @@ async def generate_with_suppression(
     growth_rate: float = 1.5,
     detection_mode: str = "rule_based",
     detection_judge_model: Optional[str] = None,
+    detection_judge_mode: Optional[str] = None,  # v0 or v1 prompt version for LLM judge
     detection_threshold: str = "any",  # For rule_based: "any" or "high"; for llm_sentence: int 1-10
     base_seed: int = 0,  # Base seed for multiple runs (like run number)
     verbose: bool = False
@@ -314,7 +315,7 @@ async def generate_with_suppression(
 
             for sent in chunk_sentences:
                 sentences_checked += 1
-                result = await score_sentence(llm_judge_client, sent, detection_judge_model)
+                result = await score_sentence(llm_judge_client, sent, detection_judge_model, detection_judge_mode)
                 score = result.get('score', 0)
                 category = result.get('category', 'Unknown')
                 test_reference_flag = result.get('test_reference_flag', 'no_test_reference')

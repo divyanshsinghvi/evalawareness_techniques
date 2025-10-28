@@ -127,7 +127,7 @@ async def extract_clean_reasoning_seed(
 
     if rollout_file and model_dir and detection_mode == "llm_sentence":
         # Construct path to categorization file
-        categorization_dir = Path('working/categorization') / model_dir
+        categorization_dir = Path('working/categorization') / mode / model_dir
         rollouts_dir = config.ROLLOUTS_DIR / model_dir
 
         # Normalize path to handle numbered overflow directories (explicit1 -> explicit)
@@ -234,7 +234,7 @@ async def extract_clean_reasoning_seed(
 
             elif detection_mode == "llm_sentence":
                 if judge_client and judge_model:
-                    result = await score_sentence(judge_client, sent, judge_model)
+                    result = await score_sentence(judge_client, sent, judge_model, mode)
                     score = result.get('score', 0)
                     test_ref_flag = result.get('test_reference_flag', 'no_test_reference')
                     threshold_int = int(detection_threshold)
@@ -457,6 +457,7 @@ async def process_rollout(
                 growth_rate=1.5,
                 detection_mode=detection_mode,
                 detection_judge_model=judge_model,
+                detection_judge_mode=mode,
                 detection_threshold=detection_threshold,
                 base_seed=base_seed,
                 verbose=verbose
@@ -469,15 +470,15 @@ async def process_rollout(
                 print(f"{'='*80}")
 
             deployment_original_score = await score_response(
-                judge_client, deployment_original_response, judge_model
+                judge_client, deployment_original_response, judge_model, mode
             )
 
             evaluation_original_score = await score_response(
-                judge_client, evaluation_original_response, judge_model
+                judge_client, evaluation_original_response, judge_model, mode
             )
 
             evaluation_suppressed_score = await score_response(
-                judge_client, evaluation_suppression_result.final_response, judge_model
+                judge_client, evaluation_suppression_result.final_response, judge_model, mode
             )
 
             # Calculate total timing
@@ -693,6 +694,8 @@ async def main():
     parser.add_argument('--removal-mode', default='self_test_only',
                        choices=['all', 'self_test_only', 'self_and_other'],
                        help='Which awareness to remove from seed: "all" (any awareness), "self_test_only" (only when model knows IT is tested), "self_and_other" (both types). Default: self_test_only')
+    parser.add_argument('--mode', type=str, required=True, choices=['v0', 'v1'],
+                       help='Prompt version to use for LLM judge (v0 or v1)')
 
     args = parser.parse_args()
 
@@ -874,19 +877,22 @@ async def main():
         for base_name in prompt_groups:
             prompt_groups[base_name].sort(key=lambda x: x[0])
 
-        # Apply prompt limit
-        if args.limit_prompts:
-            selected_prompts = sorted(prompt_groups.keys())[:args.limit_prompts]
-            prompt_groups = {k: v for k, v in prompt_groups.items() if k in selected_prompts}
-
-        # Apply specific seeds filter (overrides --limit-seeds)
+        # Apply specific seeds filter FIRST (overrides --limit-seeds)
         if specific_seeds:
-            for base_name in prompt_groups:
+            for base_name in list(prompt_groups.keys()):
                 prompt_groups[base_name] = [(seed_num, f) for seed_num, f in prompt_groups[base_name] if seed_num in specific_seeds]
+                # Remove prompts that have no matching seeds
+                if not prompt_groups[base_name]:
+                    del prompt_groups[base_name]
         # Apply seed limit per prompt (only if --seeds not specified)
         elif args.limit_seeds:
             for base_name in prompt_groups:
                 prompt_groups[base_name] = prompt_groups[base_name][:args.limit_seeds]
+
+        # Apply prompt limit AFTER seed filtering
+        if args.limit_prompts:
+            selected_prompts = sorted(prompt_groups.keys())[:args.limit_prompts]
+            prompt_groups = {k: v for k, v in prompt_groups.items() if k in selected_prompts}
 
         # Flatten back to list
         rollout_files = [f for seed_num, f in sorted(
