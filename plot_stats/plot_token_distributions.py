@@ -2,10 +2,11 @@
 Script to plot token length distributions for prompts in extracted_prompts directory.
 
 Usage:
-    python plot_token_distributions.py --model_id <hf_model_id> --mode <explicit|implicit>
+    python plot_token_distributions.py --model_id <hf_model_id> [--mode <explicit|implicit>] [--include_responses]
 
-Example:
+Examples:
     python plot_token_distributions.py --model_id "qwen/qwen3-32b" --mode explicit
+    python plot_token_distributions.py --model_id "qwen/qwen3-32b" --mode explicit --include_responses
 """
 
 import argparse
@@ -43,10 +44,15 @@ def parse_args():
         default=None,
         help="Output directory for plots (default: plot_stats/plots/<model_name>_<mode>)"
     )
+    parser.add_argument(
+        "--include_responses",
+        action="store_true",
+        help="Include model response token distributions in the analysis"
+    )
     return parser.parse_args()
 
 
-def load_prompts_from_yaml(yaml_path: str) -> Dict:
+def load_prompts_from_yaml(yaml_path: str, include_responses: bool = False) -> Dict:
     """Load prompts from a single YAML file."""
     try:
         with open(yaml_path, 'r', encoding='utf-8') as f:
@@ -60,12 +66,21 @@ def load_prompts_from_yaml(yaml_path: str) -> Dict:
         user_deploy = branch_a.get('user_message', '') if branch_a else ''
         user_eval = branch_b.get('user_message', '') if branch_b else ''
         
-        return {
+        result = {
             'system_prompt': system_prompt,
             'user_deploy': user_deploy,
             'user_eval': user_eval,
             'file': os.path.basename(yaml_path)
         }
+        
+        # Optionally include assistant responses
+        if include_responses:
+            assistant_deploy = branch_a.get('assistant_response', '') if branch_a else ''
+            assistant_eval = branch_b.get('assistant_response', '') if branch_b else ''
+            result['assistant_deploy'] = assistant_deploy
+            result['assistant_eval'] = assistant_eval
+        
+        return result
     except Exception as e:
         print(f"Error loading {yaml_path}: {e}")
         return None
@@ -83,7 +98,7 @@ def get_token_count(tokenizer, text: str) -> int:
         return 0
 
 
-def collect_token_lengths(prompts_dir: Path, tokenizer) -> Dict[str, List[int]]:
+def collect_token_lengths(prompts_dir: Path, tokenizer, include_responses: bool = False) -> Dict[str, List[int]]:
     """Collect token lengths for all prompts in the directory."""
     yaml_files = list(prompts_dir.glob("*.yaml"))
     
@@ -95,10 +110,15 @@ def collect_token_lengths(prompts_dir: Path, tokenizer) -> Dict[str, List[int]]:
         'sys_user_deploy': []
     }
     
+    # Add response categories if requested
+    if include_responses:
+        token_lengths['assistant_deploy'] = []
+        token_lengths['assistant_eval'] = []
+    
     print(f"Processing {len(yaml_files)} YAML files...")
     
     for yaml_file in tqdm(yaml_files):
-        prompt_data = load_prompts_from_yaml(str(yaml_file))
+        prompt_data = load_prompts_from_yaml(str(yaml_file), include_responses=include_responses)
         
         if prompt_data is None:
             continue
@@ -127,12 +147,24 @@ def collect_token_lengths(prompts_dir: Path, tokenizer) -> Dict[str, List[int]]:
         token_lengths['sys_user_deploy'].append(
             get_token_count(tokenizer, sys_user_deploy_combined)
         )
+        
+        # Add response token lengths if requested
+        if include_responses:
+            assistant_deploy = prompt_data.get('assistant_deploy', '')
+            assistant_eval = prompt_data.get('assistant_eval', '')
+            
+            token_lengths['assistant_deploy'].append(
+                get_token_count(tokenizer, assistant_deploy)
+            )
+            token_lengths['assistant_eval'].append(
+                get_token_count(tokenizer, assistant_eval)
+            )
     
     return token_lengths
 
 
 def plot_distributions(token_lengths: Dict[str, List[int]], output_dir: Path, 
-                       model_name: str, mode: str):
+                       model_name: str, mode: str, include_responses: bool = False):
     """Create and save distribution plots."""
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -147,6 +179,13 @@ def plot_distributions(token_lengths: Dict[str, List[int]], output_dir: Path,
         ('sys_user_eval', 'System + User Eval Token Length Distribution'),
         ('sys_user_deploy', 'System + User Deploy Token Length Distribution')
     ]
+    
+    # Add response categories if requested
+    if include_responses:
+        categories.extend([
+            ('assistant_deploy', 'Assistant Deployment Response Token Length Distribution'),
+            ('assistant_eval', 'Assistant Evaluation Response Token Length Distribution')
+        ])
     
     for category, title in categories:
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -198,7 +237,11 @@ def plot_distributions(token_lengths: Dict[str, List[int]], output_dir: Path,
         plt.close()
     
     # Create a combined plot with all distributions
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    # Adjust grid size based on number of categories
+    if include_responses:
+        fig, axes = plt.subplots(3, 3, figsize=(18, 16))  # 7 plots + 2 empty
+    else:
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))  # 5 plots + 1 empty
     axes = axes.flatten()
     
     for idx, (category, title) in enumerate(categories):
@@ -230,9 +273,9 @@ def plot_distributions(token_lengths: Dict[str, List[int]], output_dir: Path,
                 fontsize=8,
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
-    # Hide the last subplot if we have an odd number
-    if len(categories) < len(axes):
-        axes[-1].axis('off')
+    # Hide unused subplots
+    for idx in range(len(categories), len(axes)):
+        axes[idx].axis('off')
     
     fig.suptitle(f'Token Length Distributions - Model: {model_name} | Mode: {mode.upper()}',
                  fontsize=16, fontweight='bold', y=0.995)
@@ -285,7 +328,9 @@ def main():
     
     # Collect token lengths
     print(f"\nAnalyzing prompts from: {prompts_dir}")
-    token_lengths = collect_token_lengths(prompts_dir, tokenizer)
+    if args.include_responses:
+        print("Including model response token distributions...")
+    token_lengths = collect_token_lengths(prompts_dir, tokenizer, args.include_responses)
     
     # Determine output directory
     if args.output_dir:
@@ -293,11 +338,12 @@ def main():
     else:
         # Create a clean model name for directory
         model_name = args.model_id.replace("/", "_")
-        output_dir = Path(__file__).parent / "plots" / f"{model_name}_{args.mode}"
+        suffix = "_with_responses" if args.include_responses else ""
+        output_dir = Path(__file__).parent / "plots" / f"{model_name}_{args.mode}{suffix}"
     
     # Create plots
     print(f"\nGenerating plots...")
-    plot_distributions(token_lengths, output_dir, args.model_id, args.mode)
+    plot_distributions(token_lengths, output_dir, args.model_id, args.mode, args.include_responses)
     
     print("\n" + "="*80)
     print("COMPLETED!")
