@@ -102,6 +102,7 @@ async def categorize_rollout_file(
     rollout_file: Path,
     output_file: Path,
     judge_model: str,
+    mode: str,
     batch_size: int,
     semaphore: asyncio.Semaphore,
     use_checksum: bool = True,
@@ -165,12 +166,12 @@ async def categorize_rollout_file(
                 batches = [all_sentences[i:i+batch_size] for i in range(0, len(all_sentences), batch_size)]
                 batch_results = []
                 for batch in batches:
-                    result = await score_batch(client, batch, judge_model)
+                    result = await score_batch(client, batch, judge_model, mode)
                     batch_results.extend(result)
             else:
                 batch_results = []
                 for sentence in all_sentences:
-                    result = await score_batch(client, [sentence], judge_model)
+                    result = await score_batch(client, [sentence], judge_model, mode)
                     batch_results.extend(result)
 
         # Split results back (order: deploy_thinking, deploy_visible, eval_thinking, eval_visible)
@@ -281,6 +282,8 @@ async def main():
                        help='Skip files that exist (fast, no checksum verification)')
     parser.add_argument('--prompt-list', type=str,
                        help='Path to file containing prompt names to filter (YAML, CSV, or text format)')
+    parser.add_argument('--mode', type=str, required=True, choices=['v0', 'v1'],
+                       help='Prompt version to use (v0 or v1)')
 
     args = parser.parse_args()
 
@@ -303,7 +306,7 @@ async def main():
             return 1
 
     rollout_dir = config.ROLLOUTS_DIR / args.model_dir
-    categorization_dir = Path('working/categorization') / args.model_dir
+    categorization_dir = Path('working/categorization') / args.mode / args.model_dir
 
     if not rollout_dir.exists():
         print(f"Error: {rollout_dir} not found")
@@ -470,7 +473,7 @@ async def main():
     skip_existing = args.skip_existing
     semaphore = asyncio.Semaphore(args.concurrency)
     tasks = [
-        categorize_rollout_file(client, rollout, output, args.judge_model, args.batch_size, semaphore, use_checksum, skip_existing)
+        categorize_rollout_file(client, rollout, output, args.judge_model, args.mode, args.batch_size, semaphore, use_checksum, skip_existing)
         for rollout, output in file_pairs
     ]
 

@@ -74,6 +74,7 @@ async def categorize_response_file(
     rollout_file: Path,
     output_file: Path,
     judge_model: str,
+    mode: str,
     semaphore: asyncio.Semaphore,
     use_checksum: bool = True,
     skip_existing: bool = False
@@ -118,12 +119,12 @@ async def categorize_response_file(
         async with semaphore:
             # Score deployment response (full with thinking)
             if deployment_response:
-                deployment_awareness = await score_response(client, deployment_response, judge_model)
+                deployment_awareness = await score_response(client, deployment_response, judge_model, mode)
                 data['deployment']['awareness'] = deployment_awareness
 
             # Score evaluation response (full with thinking)
             if evaluation_response:
-                evaluation_awareness = await score_response(client, evaluation_response, judge_model)
+                evaluation_awareness = await score_response(client, evaluation_response, judge_model, mode)
                 data['evaluation']['awareness'] = evaluation_awareness
 
         # Save to response_categorization folder
@@ -165,6 +166,8 @@ async def main():
                        help='Skip files that exist (fast, no checksum verification)')
     parser.add_argument('--prompt-list', type=str,
                        help='Path to file containing prompt names to filter (e.g., high_awareness_high_change_prompts.txt)')
+    parser.add_argument('--mode', type=str, required=True, choices=['v0', 'v1'],
+                       help='Prompt version to use (v0 or v1)')
 
     args = parser.parse_args()
 
@@ -187,7 +190,7 @@ async def main():
             return 1
 
     rollout_dir = config.ROLLOUTS_DIR / args.model_dir
-    response_categorization_dir = config.RESPONSE_CATEGORIZATION_DIR / args.model_dir
+    response_categorization_dir = config.RESPONSE_CATEGORIZATION_DIR / args.mode / args.model_dir
 
     if not rollout_dir.exists():
         print(f"Error: {rollout_dir} not found")
@@ -320,7 +323,7 @@ async def main():
     skip_existing = args.skip_existing
     semaphore = asyncio.Semaphore(args.concurrency)
     tasks = [
-        categorize_response_file(client, rollout, output, args.judge_model, semaphore, use_checksum, skip_existing)
+        categorize_response_file(client, rollout, output, args.judge_model, args.mode, semaphore, use_checksum, skip_existing)
         for rollout, output in file_pairs
     ]
 

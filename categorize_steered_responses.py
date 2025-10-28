@@ -38,6 +38,7 @@ async def categorize_steered_file(
     steered_file: Path,
     output_file: Path,
     judge_model: str,
+    mode: str,
     semaphore: asyncio.Semaphore,
     use_checksum: bool = True,
     skip_existing: bool = False
@@ -89,7 +90,7 @@ async def categorize_steered_file(
         async with semaphore:
             # Score steered response
             if steered_response:
-                awareness = await score_response(client, steered_response, judge_model)
+                awareness = await score_response(client, steered_response, judge_model, mode)
                 data['steered_response']['awareness'] = awareness
 
         # Save to steered categorization folder
@@ -125,6 +126,8 @@ async def main():
                        help='Force reprocess all files (ignore checksum)')
     parser.add_argument('--skip-existing', action='store_true',
                        help='Skip files that exist (fast, no checksum verification)')
+    parser.add_argument('--mode', type=str, required=True, choices=['v0', 'v1'],
+                       help='Prompt version to use (v0 or v1)')
 
     args = parser.parse_args()
 
@@ -135,8 +138,8 @@ async def main():
 
     steered_dir = Path(args.steered_dir)
 
-    # Create output directory path: steered_categorization mirrors steered-outs structure
-    # steered-outs/model_name/... -> steered_categorization/model_name/...
+    # Create output directory path: steered_categorization/{mode} mirrors steered-outs structure
+    # steered-outs/model_name/... -> steered_categorization/{mode}/model_name/...
     if 'steered-outs' in steered_dir.parts:
         # Extract parts after 'working'
         parts_after_working = []
@@ -147,13 +150,14 @@ async def main():
             elif found_working:
                 if part == 'steered-outs':
                     parts_after_working.append('steered_categorization')
+                    parts_after_working.append(args.mode)
                 else:
                     parts_after_working.append(part)
 
         steered_categorization_dir = Path('working') / Path(*parts_after_working)
     else:
         # Default fallback
-        steered_categorization_dir = Path('working/steered_categorization') / steered_dir.name
+        steered_categorization_dir = Path('working/steered_categorization') / args.mode / steered_dir.name
 
     if not steered_dir.exists():
         print(f"Error: {steered_dir} not found")
@@ -204,7 +208,7 @@ async def main():
     skip_existing = args.skip_existing
     semaphore = asyncio.Semaphore(args.concurrency)
     tasks = [
-        categorize_steered_file(client, steered, output, args.judge_model, semaphore, use_checksum, skip_existing)
+        categorize_steered_file(client, steered, output, args.judge_model, args.mode, semaphore, use_checksum, skip_existing)
         for steered, output in file_pairs
     ]
 
