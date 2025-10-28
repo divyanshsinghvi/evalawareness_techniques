@@ -220,7 +220,9 @@ def steer_and_generate(
             add_special_tokens=False, 
             return_tensors="pt", 
             padding=True,
-            padding_side="left"
+            padding_side="left",
+            truncation=True,
+            max_length=1024,
         ).to("cuda")
         
         tok_batches.append(tok_batch)
