@@ -350,6 +350,11 @@ async def process_rollout(
             "At the end of your response, clearly state your final recommendation as \\boxed{A} or \\boxed{B}."
         )
 
+        # If replacement didn't happen (original text not found), add instruction to end
+        boxed_instruction = "At the end of your response, clearly state your final recommendation as \\boxed{A} or \\boxed{B}."
+        if boxed_instruction not in system_prompt:
+            system_prompt = system_prompt.rstrip() + " " + boxed_instruction
+
         # Extract clean reasoning seed from evaluation response using same detection method
         # Collects sentences until first aware sentence, then stops
         initial_reasoning, seed_stats = await extract_clean_reasoning_seed(
@@ -586,6 +591,8 @@ async def main():
                        help='Limit number of unique prompts (all seeds per prompt)')
     parser.add_argument('--limit-seeds', type=int, default=None,
                        help='Limit seeds per prompt (filters all prompts or requires --limit-prompts)')
+    parser.add_argument('--seeds', type=str, default=None,
+                       help='Seed range as "start,end" (e.g., "0,10" for seeds 0-10 inclusive) or single seed "0". Overrides --limit-seeds.')
     parser.add_argument('--skip-existing', action='store_true',
                        help='Skip files that exist (fast, no checksum verification)')
     parser.add_argument('--verbose', action='store_true',
@@ -607,9 +614,34 @@ async def main():
 
     args = parser.parse_args()
 
+    # Parse --seeds argument
+    specific_seeds = None
+    if args.seeds:
+        try:
+            parts = [s.strip() for s in args.seeds.split(',')]
+            if len(parts) == 1:
+                # Single seed: "0"
+                specific_seeds = {int(parts[0])}
+            elif len(parts) == 2:
+                # Range: "0,10" means 0 to 10 inclusive
+                start, end = int(parts[0]), int(parts[1])
+                if start > end:
+                    print(f"Error: --seeds range start ({start}) must be <= end ({end})")
+                    return
+                specific_seeds = set(range(start, end + 1))
+            else:
+                print(f"Error: --seeds must be 'start,end' range or single seed (e.g., '0,10' or '0')")
+                return
+
+            if args.verbose:
+                print(f"Filtering to seeds: {sorted(specific_seeds)}")
+        except ValueError:
+            print(f"Error: --seeds must be valid integers (e.g., '0' or '0,10')")
+            return
+
     # Validate arguments
-    if args.limit and (args.limit_prompts or args.limit_seeds):
-        print("Error: --limit cannot be used with --limit-prompts or --limit-seeds")
+    if args.limit and (args.limit_prompts or args.limit_seeds or args.seeds):
+        print("Error: --limit cannot be used with --limit-prompts, --limit-seeds, or --seeds")
         return
 
     # Validate prompt-list contains model-dir name (safety check)
@@ -743,7 +775,7 @@ async def main():
         rollout_files = filtered_files
 
     # Apply filtering
-    if args.limit_prompts or args.limit_seeds:
+    if args.limit_prompts or args.limit_seeds or specific_seeds:
         from collections import defaultdict
 
         # Group files by base prompt (everything before "_seed_")
@@ -765,8 +797,12 @@ async def main():
             selected_prompts = sorted(prompt_groups.keys())[:args.limit_prompts]
             prompt_groups = {k: v for k, v in prompt_groups.items() if k in selected_prompts}
 
-        # Apply seed limit per prompt
-        if args.limit_seeds:
+        # Apply specific seeds filter (overrides --limit-seeds)
+        if specific_seeds:
+            for base_name in prompt_groups:
+                prompt_groups[base_name] = [(seed_num, f) for seed_num, f in prompt_groups[base_name] if seed_num in specific_seeds]
+        # Apply seed limit per prompt (only if --seeds not specified)
+        elif args.limit_seeds:
             for base_name in prompt_groups:
                 prompt_groups[base_name] = prompt_groups[base_name][:args.limit_seeds]
 

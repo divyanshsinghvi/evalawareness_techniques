@@ -570,7 +570,12 @@ class PromptRollout:
         """Get output filepath for a rollout.
 
         Structure: working/rollouts/{model_name}/{same_directory_structure}/{filename}_seed_{i}.yaml
+
+        Auto-splits directories when they exceed 9960 files (HuggingFace limit is 10,000).
+        If explicit/ has >9960 files, writes to explicit1/, explicit2/, etc.
         """
+        MAX_FILES_PER_DIR = 9960
+
         # Extract relative path from extracted_prompts/
         base_dir = config.EXTRACTED_PROMPTS_DIR
         try:
@@ -579,7 +584,7 @@ class PromptRollout:
             # If source_file is not under base_dir, just use the parent
             relative_path = source_file.parent.name / source_file.name
 
-        # Get the category directory (e.g., behavioral_change/ideal/)
+        # Get the category directory (e.g., behavioral_change/explicit/)
         category_path = relative_path.parent
 
         # Get the filename without extension
@@ -588,8 +593,41 @@ class PromptRollout:
         # Create model directory name (replace / with _)
         model_safe = self.model.replace('/', '_')
 
-        # Build output path: rollouts/{model_name}/{category}/{filename}_seed_{i}.yaml
-        output_dir = config.ROLLOUTS_DIR / model_safe / category_path
+        # Build base output path: rollouts/{model_name}/{category}/
+        base_output_dir = config.ROLLOUTS_DIR / model_safe / category_path
+
+        # Check if we need to use a numbered subdirectory
+        # If base_output_dir has >9960 files, use numbered subdirectory (explicit1, explicit2, ...)
+        # Numbered directories are created at the SAME level as base_output_dir, not inside it
+        output_dir = base_output_dir
+
+        if base_output_dir.exists():
+            file_count = len([f for f in base_output_dir.iterdir() if f.is_file()])
+
+            if file_count >= MAX_FILES_PER_DIR:
+                # Find the next available numbered subdirectory at parent level
+                dir_name = base_output_dir.name
+                parent_dir = base_output_dir.parent
+                counter = 1
+
+                while True:
+                    numbered_dir = parent_dir / f"{dir_name}{counter}"
+
+                    if not numbered_dir.exists():
+                        # Use this new directory
+                        output_dir = numbered_dir
+                        break
+
+                    # Check if this numbered dir is also full
+                    numbered_file_count = len([f for f in numbered_dir.iterdir() if f.is_file()])
+                    if numbered_file_count < MAX_FILES_PER_DIR:
+                        # Use this existing numbered directory
+                        output_dir = numbered_dir
+                        break
+
+                    # This numbered dir is full, try next
+                    counter += 1
+
         output_dir.mkdir(parents=True, exist_ok=True)
 
         filename = f"{filename_stem}_seed_{seed}.yaml"
@@ -904,6 +942,35 @@ async def process_single_rollout(runner: PromptRollout, filepath: Path, seed: in
         print(f"[{filepath.name}] seed={seed} ✓ {output_path.name}")
     return result
 
+def rollout_exists_anywhere(base_output_dir: Path, filename: str) -> bool:
+    """Check if rollout exists in base directory or any numbered subdirectories at parent level.
+
+    Args:
+        base_output_dir: Base output directory (e.g., rollouts/model/behavioral_change/explicit/)
+        filename: Rollout filename (e.g., prompt_seed_0.yaml)
+
+    Returns:
+        True if file exists in base_output_dir or numbered sibling directories (explicit1, explicit2, ...)
+    """
+    # Check base directory
+    if (base_output_dir / filename).exists():
+        return True
+
+    # Check numbered subdirectories at parent level (explicit1, explicit2, ...)
+    if base_output_dir.exists():
+        dir_name = base_output_dir.name
+        parent_dir = base_output_dir.parent
+        counter = 1
+        while True:
+            numbered_dir = parent_dir / f"{dir_name}{counter}"
+            if not numbered_dir.exists():
+                break
+            if (numbered_dir / filename).exists():
+                return True
+            counter += 1
+
+    return False
+
 def is_rollout_up_to_date(source_file: Path, rollout_file: Path) -> bool:
     """Check if rollout file is up-to-date with source file by comparing checksums.
 
@@ -944,7 +1011,7 @@ def is_rollout_up_to_date(source_file: Path, rollout_file: Path) -> bool:
         return False
 
 
-async def process_files(files: List[Path], runner: PromptRollout, rollouts_per_prompt: int, start_seed: int, verbose: bool = False):
+async def process_files(files: List[Path], runner: PromptRollout, rollouts_per_prompt: int, start_seed: int, verbose: bool = False, skip_existing: bool = False):
     """Process all files with multiple rollouts concurrently, saving immediately."""
     tasks = []
     skipped_count = 0
@@ -955,8 +1022,22 @@ async def process_files(files: List[Path], runner: PromptRollout, rollouts_per_p
             seed = start_seed + rollout_idx
             output_path = runner.get_output_path(filepath, seed)
 
-            if output_path.exists():
-                # Check if rollout is up-to-date with source
+            # Build base output dir for checking numbered subdirectories
+            relative_path = filepath.relative_to(config.EXTRACTED_PROMPTS_DIR)
+            category_path = relative_path.parent
+            model_safe = runner.model.replace('/', '_')
+            base_output_dir = config.ROLLOUTS_DIR / model_safe / category_path
+            filename = f"{filepath.stem}_seed_{seed}.yaml"
+
+            if skip_existing:
+                # Simple filename check across all directories
+                if rollout_exists_anywhere(base_output_dir, filename):
+                    if verbose:
+                        print(f"[{filepath.name}] seed={seed} → SKIPPED (exists)")
+                    skipped_count += 1
+                    continue
+            elif output_path.exists():
+                # Checksum-based validation (default)
                 if is_rollout_up_to_date(filepath, output_path):
                     if verbose:
                         print(f"[{filepath.name}] seed={seed} → SKIPPED (up-to-date)")
@@ -1281,7 +1362,7 @@ async def main_async(args):
         request_delay=args.request_delay
     )
 
-    await process_files(files, runner, args.rollouts_per_prompt, args.seed, args.verbose)
+    await process_files(files, runner, args.rollouts_per_prompt, args.seed, args.verbose, args.skip_existing)
 
     print()
     print("=" * 100)
@@ -1325,6 +1406,8 @@ Experiments:
                        help='API key (default: OPENROUTER_API_KEY env var, or "ollama" for local)')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Show detailed output for each file/seed (default: show progress bar only)')
+    parser.add_argument('--skip-existing', action='store_true',
+                       help='Skip existing rollouts based on filename only (faster, ignores checksum). Checks all numbered subdirectories (explicit, explicit1, explicit2, ...)')
     parser.add_argument('--include-incomplete', action='store_true',
                        help='Include files from incomplete directory (default: skip incomplete)')
     parser.add_argument('--request-delay', type=float, default=config.DEFAULT_REQUEST_DELAY,

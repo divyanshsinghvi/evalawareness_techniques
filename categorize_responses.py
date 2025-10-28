@@ -36,6 +36,37 @@ def calculate_file_checksum(file_path: Path) -> str:
     return sha256_hash.hexdigest()
 
 
+def normalize_numbered_directory_path(relative_path: Path) -> Path:
+    """Normalize numbered overflow directories (explicit1, explicit2) back to base directory (explicit).
+
+    This handles the case where rollouts are stored in numbered subdirectories for HuggingFace's 10k file limit,
+    but we want all categorizations to map to the base directory name.
+
+    Examples:
+        behavioral_change/explicit1/file.yaml -> behavioral_change/explicit/file.yaml
+        behavioral_change/explicit2/file.yaml -> behavioral_change/explicit/file.yaml
+        behavioral_change/ideal1/file.yaml -> behavioral_change/ideal/file.yaml
+
+    Args:
+        relative_path: Relative path from rollouts directory
+
+    Returns:
+        Normalized path with numbered directories replaced by base directory
+    """
+    parts = list(relative_path.parts)
+
+    # Check each part for numbered suffix pattern (e.g., explicit1, ideal2)
+    for i, part in enumerate(parts):
+        # Match directory names ending with digits (e.g., explicit1, explicit2)
+        match = re.match(r'^(.+?)(\d+)$', part)
+        if match:
+            base_name = match.group(1)
+            # Replace with base name (remove number suffix)
+            parts[i] = base_name
+
+    return Path(*parts) if parts else relative_path
+
+
 
 
 async def categorize_response_file(
@@ -272,9 +303,9 @@ async def main():
 
     print(f"Found {len(rollout_files)} files")
 
-    # Create file pairs
+    # Create file pairs with normalized paths (maps explicit1/explicit2 -> explicit)
     file_pairs = [
-        (f, response_categorization_dir / f.relative_to(rollout_dir))
+        (f, response_categorization_dir / normalize_numbered_directory_path(f.relative_to(rollout_dir)))
         for f in rollout_files
     ]
 

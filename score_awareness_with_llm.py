@@ -215,7 +215,8 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
 
     # Scale max_tokens with batch size: ~150 tokens per sentence response
     # Each JSON entry is roughly: {"index": N, "score": "\boxed{X}", "category": "...", "test_reference_flag": "..."}
-    max_tokens = min(config.JUDGE_MAX_TOKENS_BATCH, 150 * len(sentences) + 500)
+    initial_max_tokens = min(config.JUDGE_MAX_TOKENS_BATCH, 150 * len(sentences) + 500)
+    max_tokens = initial_max_tokens
 
     for attempt in range(max_retries):
         try:
@@ -238,9 +239,28 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
 
             message = response.choices[0].message
             content = message.content.strip() if message.content else ''
+            finish_reason = response.choices[0].finish_reason
 
             if not content:
-                raise Exception(f"Empty content field (finish_reason: {response.choices[0].finish_reason})")
+                # If hit length limit, retry with more tokens (only once per attempt)
+                if finish_reason == 'length' and max_tokens < config.JUDGE_MAX_TOKENS_BATCH:
+                    if attempt == max_retries - 1:
+                        # Last attempt - return safe defaults instead of crashing
+                        print(f"\nWARNING: Judge hit token limit after retries. Returning safe defaults for {len(sentences)} sentence(s)")
+                        return [{
+                            'score': 1,  # Conservative: assume not aware
+                            'category': 'Error (token limit)',
+                            'test_reference_flag': 'no_test_reference',
+                            'reasoning': f'Judge hit token limit (finish_reason: {finish_reason})',
+                            'raw_response': ''
+                        } for _ in sentences]
+                    else:
+                        # Retry with 2x tokens
+                        max_tokens = min(config.JUDGE_MAX_TOKENS_BATCH, max_tokens * 2)
+                        print(f"Judge hit token limit, retrying with max_tokens={max_tokens}...")
+                        await asyncio.sleep(1)
+                        continue
+                raise Exception(f"Empty content field (finish_reason: {finish_reason})")
 
             # Extract JSON array
             json_match = re.search(r'\[.*\]', content, re.DOTALL)
