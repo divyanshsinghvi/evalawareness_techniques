@@ -371,7 +371,7 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
 
     # Scale max_tokens with batch size: ~150 tokens per sentence response
     # Each JSON entry is roughly: {"index": N, "score": "\boxed{X}", "category": "...", "test_reference_flag": "..."}
-    initial_max_tokens = min(config.JUDGE_MAX_TOKENS_BATCH, 150 * len(sentences) + 500)
+    initial_max_tokens = min(config.JUDGE_MAX_TOKENS_BATCH, 1500 * len(sentences) + 500)
     max_tokens = initial_max_tokens
 
     for attempt in range(max_retries):

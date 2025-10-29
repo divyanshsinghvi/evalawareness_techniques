@@ -35,7 +35,7 @@ ROLLOUT_SEED_START = 0
 
 # Judge model settings (score_awareness_with_llm.py)
 JUDGE_TEMPERATURE = 0.0
-JUDGE_MAX_TOKENS_BATCH = 36000  # for batch scoring
+JUDGE_MAX_TOKENS_BATCH = 30000  # for batch scoring
 JUDGE_MAX_TOKENS_RESPONSE = 10000  # for full response scoring
 JUDGE_BATCH_SIZE = 5
 
@@ -64,6 +64,7 @@ WORKING_DIR = Path("working")
 EXTRACTED_PROMPTS_DIR = WORKING_DIR / "extracted_prompts"
 ROLLOUTS_DIR = WORKING_DIR / "rollouts"
 RESPONSE_CATEGORIZATION_DIR = WORKING_DIR / "response_categorization"
+SENTENCE_CATEGORIZATION_DIR = WORKING_DIR / "categorization"
 SUPPRESSION_EXPERIMENTS_DIR = WORKING_DIR / "suppression_experiments"
 
 # Analysis output directories
@@ -134,6 +135,7 @@ def ensure_dirs():
         EXTRACTED_PROMPTS_DIR,
         ROLLOUTS_DIR,
         RESPONSE_CATEGORIZATION_DIR,
+        SENTENCE_CATEGORIZATION_DIR,
         SUPPRESSION_EXPERIMENTS_DIR,
         OUTPUTS_DIR,
         LOGS_DIR,

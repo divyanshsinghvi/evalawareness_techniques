@@ -389,7 +389,7 @@ def analyze_mean_per_prompt(data):
         print(f"{prompt_display:<50} {p['deploy_mean']:>10.2f} {p['eval_mean']:>10.2f} {p['delta_mean']:>10.2f} {p['bc_rate']:>10.1%}")
 
 
-def export_per_prompt_csv(data, model_dir: str):
+def export_per_prompt_csv(data, mode: str, model_dir: str):
     """Export detailed per-prompt statistics to CSV."""
     import csv
     from collections import defaultdict
@@ -443,7 +443,7 @@ def export_per_prompt_csv(data, model_dir: str):
         prompt_data[prompt_id]['behavioral_changes'].append(entry.get('behavioral_change', False))
 
     # Create output CSV
-    output_file = Path('working/response_categorization') / model_dir / 'per_prompt_stats.csv'
+    output_file = Path('working/response_categorization') / mode / model_dir / 'per_prompt_stats.csv'
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_file, 'w', newline='') as f:
@@ -535,7 +535,7 @@ def export_per_prompt_csv(data, model_dir: str):
     print()
 
 
-def export_high_awareness_bc_seeds(data, model_dir: str):
+def export_high_awareness_bc_seeds(data, mode: str, model_dir: str):
     """Export high-awareness behavioral change seeds to YAML.
 
     Categorizes prompts by eval-awareness percentage buckets:
@@ -716,7 +716,7 @@ def export_high_awareness_bc_seeds(data, model_dir: str):
     }
 
     # Write output YAML
-    output_file = Path('working/response_categorization') / model_dir / 'high_awareness_bc_seeds.yaml'
+    output_file = Path('working/response_categorization') / mode / model_dir / 'high_awareness_bc_seeds.yaml'
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_file, 'w') as f:
@@ -828,11 +828,11 @@ def analyze_awareness_type_by_score(data):
     print()
 
 
-def export_top3_high_awareness_bc_seeds(model_dir: str):
+def export_top3_high_awareness_bc_seeds(mode: str, model_dir: str):
     """Load high_awareness_bc_seeds.yaml and create top-3 version with only top 3 eval awareness seeds per prompt."""
 
     # Load the full high_awareness_bc_seeds.yaml file
-    input_file = Path('working/response_categorization') / model_dir / 'high_awareness_bc_seeds.yaml'
+    input_file = Path('working/response_categorization') / mode / model_dir / 'high_awareness_bc_seeds.yaml'
 
     if not input_file.exists():
         print(f"Warning: {input_file} not found, skipping top-3 export")
@@ -887,7 +887,7 @@ def export_top3_high_awareness_bc_seeds(model_dir: str):
     top3_data['summary']['total_bc_aware_seeds_included'] = total_seeds_top3
 
     # Write output YAML
-    output_file = Path('working/response_categorization') / model_dir / 'high_awareness_bc_seeds_top3.yaml'
+    output_file = Path('working/response_categorization') / mode / model_dir / 'high_awareness_bc_seeds_top3.yaml'
 
     with open(output_file, 'w') as f:
         yaml.dump(top3_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
@@ -908,10 +908,12 @@ def main():
     parser = argparse.ArgumentParser(description='Analyze response categorization statistics')
     parser.add_argument('--model-dir', type=str, required=True,
                        help='Model directory (e.g., qwen_qwen3-32b)')
+    parser.add_argument('--mode', type=str, required=True, choices=['v0', 'v1'],
+                       help='Prompt version to use (v0 or v1)')
 
     args = parser.parse_args()
 
-    categorization_dir = Path('working/response_categorization') / args.model_dir
+    categorization_dir = Path('working/response_categorization') / args.mode / args.model_dir
 
     if not categorization_dir.exists():
         print(f"Error: {categorization_dir} not found")
@@ -936,13 +938,13 @@ def main():
     analyze_awareness_type_by_score(data)
 
     # Export per-prompt CSV
-    export_per_prompt_csv(data, args.model_dir)
+    export_per_prompt_csv(data, args.mode, args.model_dir)
 
     # Export high-awareness BC seeds
-    export_high_awareness_bc_seeds(data, args.model_dir)
+    export_high_awareness_bc_seeds(data, args.mode, args.model_dir)
 
     # Export top-3 version
-    export_top3_high_awareness_bc_seeds(args.model_dir)
+    export_top3_high_awareness_bc_seeds(args.mode, args.model_dir)
 
     print(f"\n{'='*80}")
     print(f"ANALYSIS COMPLETE")
