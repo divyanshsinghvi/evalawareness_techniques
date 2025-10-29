@@ -552,6 +552,37 @@ async def generate_with_suppression(
                 print(f"\n  🔧 PREFILL: (empty - first generation)")
             print()
 
+        # Handle no_reasoning strategy (force close thinking immediately, generate only content)
+        if reasoning_strategy == "no_reasoning":
+            if verbose >= 2:
+                print(f"\n  📌 STRATEGY: no_reasoning")
+                print(f"     Forcing thinking tag closed immediately")
+                print(f"     Generating content only (no reasoning)...")
+
+            # Force close thinking tag with empty reasoning
+            current_messages = client.format_messages_with_prefill(
+                base_messages=base_messages,
+                prefill_reasoning="",  # Empty reasoning
+                prefill_content="",
+                force_close_thinking=True  # Close thinking immediately
+            )
+
+            response = await client.generate(current_messages, max_tokens=4000)
+            total_api_time += response.api_time
+            api_call_count += 1
+            suppression_model_api_time += response.api_time
+            suppression_model_api_calls += 1
+
+            clean_reasoning = ""  # No reasoning
+            clean_content = response.content
+
+            if verbose >= 2:
+                print(f"     ✓ Reasoning: 0 chars (forced closed)")
+                print(f"     ✓ Generated {len(clean_content)} chars of content")
+
+            # Skip the rest of the loop - we're done
+            break
+
         # Handle deployment strategies (simple regeneration with modified system prompt)
         if reasoning_strategy in ["system_prompt_deployment", "system_prompt_deployment_no_speculation", "system_prompt_taboo_words"]:
             if verbose >= 2:

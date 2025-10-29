@@ -90,7 +90,7 @@ async def categorize_steered_file(
         async with semaphore:
             # Score steered response
             if steered_response:
-                awareness = await score_response(client, steered_response, judge_model, mode)
+                awareness = await score_response(client, steered_response, judge_model, mode, verbose=False)
                 data['steered_response']['awareness'] = awareness
 
         # Save to steered categorization folder

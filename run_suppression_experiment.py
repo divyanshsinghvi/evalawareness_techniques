@@ -534,8 +534,8 @@ async def setup_experiment(
     if "boxed{A}" not in system_prompt:
         system_prompt = system_prompt.rstrip() + " " + boxed_instruction
 
-    # Skip seed extraction for deployment strategies (they don't use suppression)
-    if strategy in deployment_instructions:
+    # Skip seed extraction for deployment strategies and no_reasoning (they don't use suppression)
+    if strategy in deployment_instructions or strategy == "no_reasoning":
         initial_reasoning_till_first = ""
         initial_reasoning_all = ""
         seed_stats = {}
@@ -980,8 +980,8 @@ async def main():
     parser.add_argument('--final-judge-model', default='qwen/qwen3-32b',
                        help='Judge model for final scoring (score_response calls, must be qwen/qwen3-32b)')
     parser.add_argument('--strategy', default='chunk_resample',
-                       choices=['chunk_resample', 'seed', 'hybrid', 'remove_only', 'remove_only_till_first', 'system_prompt_deployment', 'system_prompt_deployment_no_speculation', 'system_prompt_taboo_words'],
-                       help='Suppression strategy: chunk_resample (iterative resample), remove_only (remove ALL aware sentences, keep all clean), remove_only_till_first (keep reasoning till first aware sentence), system_prompt_deployment (add deployment instruction to system prompt), system_prompt_deployment_no_speculation (add deployment instruction with no speculation constraint), system_prompt_taboo_words (prohibit any reasoning about evaluation/monitoring)')
+                       choices=['chunk_resample', 'seed', 'hybrid', 'remove_only', 'remove_only_till_first', 'system_prompt_deployment', 'system_prompt_deployment_no_speculation', 'system_prompt_taboo_words', 'no_reasoning'],
+                       help='Suppression strategy: chunk_resample (iterative resample), remove_only (remove ALL aware sentences, keep all clean), remove_only_till_first (keep reasoning till first aware sentence), system_prompt_deployment (add deployment instruction to system prompt), system_prompt_deployment_no_speculation (add deployment instruction with no speculation constraint), system_prompt_taboo_words (prohibit any reasoning about evaluation/monitoring), no_reasoning (force close thinking tag immediately, generate only content)')
     parser.add_argument('--max-iterations', type=int, default=15,
                        help='Max suppression iterations (default: 15)')
     parser.add_argument('--max-resample-attempts', type=int, default=5,

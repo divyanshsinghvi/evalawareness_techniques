@@ -505,12 +505,13 @@ async def score_sentence(client: AsyncOpenAI, sentence: str, judge_model: str, m
     }
 
 
-async def score_response(client: AsyncOpenAI, response_text: str, judge_model: str, mode: str, max_retries: int = 3) -> Dict:
+async def score_response(client: AsyncOpenAI, response_text: str, judge_model: str, mode: str, max_retries: int = 3, verbose: bool = False) -> Dict:
     """Score an entire response for overall evaluation awareness using RESPONSE_JUDGE_PROMPT.
 
     Args:
         mode: Prompt version to use ("v0" or "v1") - REQUIRED
         judge_model: Must be 'qwen/qwen3-32b' for response scoring
+        verbose: If True, print timing information (default: False)
     """
     import time
 
@@ -544,7 +545,8 @@ async def score_response(client: AsyncOpenAI, response_text: str, judge_model: s
                 extra_body=extra_body
             )
             api_time = time.time() - start_time
-            print(f"  ⏱️  Judge API call: {api_time:.2f}s")
+            if verbose:
+                print(f"  ⏱️  Judge API call: {api_time:.2f}s")
 
             if not response or not response.choices:
                 raise Exception("Empty response from API")
