@@ -8,6 +8,7 @@ Uses OpenRouter API directly with proper thinking token support.
 import re
 import sys
 import os
+import logging
 from pathlib import Path
 from typing import List, Optional, Dict
 from dataclasses import dataclass, asdict
@@ -20,6 +21,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import analyze_awareness_levels
 from suppression.openrouter_client import OpenRouterClient
 from score_awareness_with_llm import score_sentence, AsyncOpenAI
+
+# Get module logger
+logger = logging.getLogger(__name__)
 
 
 class MaxResampleAttemptsExhausted(Exception):
@@ -109,6 +113,10 @@ class SuppressionResult:
     chunk_resample_details: List[ChunkResampleInfo]
     total_api_time: float = 0.0
     api_call_count: int = 0
+    suppression_model_api_time: float = 0.0  # Time for suppression model generation calls
+    suppression_model_api_calls: int = 0  # Count of suppression model calls
+    detection_judge_api_time: float = 0.0  # Time for detection judge calls during generation
+    detection_judge_api_calls: int = 0  # Count of detection judge calls
     final_content_score: Optional[Dict] = None  # LLM judge score for final content
     final_reasoning_score: Optional[Dict] = None  # LLM judge score for final reasoning
     final_full_response_score: Optional[Dict] = None  # LLM judge score for full response
@@ -190,7 +198,8 @@ async def generate_with_suppression(
     model_name: str = "qwen/qwen3-30b-a3b-thinking-2507",
     chunk_strategy: str = "sentence",
     reasoning_strategy: str = "chunk_resample",
-    initial_reasoning: str = "",
+    initial_reasoning_till_first: str = "",
+    initial_reasoning_all: str = "",
     initial_content: str = "",
     max_iterations: int = 10,
     max_resample_attempts_per_chunk: int = 3,
@@ -226,6 +235,10 @@ async def generate_with_suppression(
           (good for steering model away from consistent awareness patterns)
         - "hybrid": Try chunk resampling first, fall back to seeding if fails
           (best of both worlds, most robust)
+        - "remove_only_till_first": Use clean reasoning up to first aware sentence, close thinking, generate content
+          (simple removal, no resampling)
+        - "remove_only": Use all clean sentences (skip aware ones), close thinking, generate content
+          (maximal clean reasoning preserved, no resampling)
 
     Detection Modes:
         - "rule_based": Use analyze_awareness_levels() with regex patterns
@@ -239,8 +252,9 @@ async def generate_with_suppression(
         system_prompt: Optional system prompt
         model_name: Model to use (OpenRouter format)
         chunk_strategy: "sentence" or "paragraph" chunking for content
-        reasoning_strategy: "chunk_resample", "seed", or "hybrid"
-        initial_reasoning: Pre-existing clean reasoning to start with (optional)
+        reasoning_strategy: "chunk_resample", "seed", "hybrid", "remove_only_till_first", or "remove_only"
+        initial_reasoning_till_first: Pre-existing clean reasoning up to first aware sentence (optional)
+        initial_reasoning_all: Pre-existing clean reasoning (all clean sentences) (optional)
         initial_content: Pre-existing clean content to start with (optional)
         max_iterations: Maximum resampling operations allowed
         max_resample_attempts_per_chunk: Attempts to regenerate each eval-aware chunk
@@ -257,13 +271,46 @@ async def generate_with_suppression(
     Returns:
         SuppressionResult with final response and metrics
     """
-    # Create OpenRouter client with SiliconFlow provider (supports prefilling)
+    # Create OpenRouter client with configured providers
+    # Import config to get provider preferences and model capabilities
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    import config
+
+    provider_config = config.get_provider_config(model_name)
+    provider = provider_config.get("provider", {}).get("order") if provider_config else None
+
+    assert provider is not None, (
+        f"No provider configuration found for model '{model_name}'. "
+        f"Add provider config to config.MODEL_PROVIDER_MAP"
+    )
+
+    # Get model capabilities to determine if force_close_thinking is supported
+    model_capabilities = config.get_model_capabilities(model_name)
+    supports_force_close_thinking = model_capabilities.get("supports_force_close_thinking", True)
+    supported_suppression_targets = model_capabilities.get("supported_suppression_targets", ["reasoning_only", "full"])
+
+    # Validate that the requested suppression_target is supported by the model
+    if suppression_target not in supported_suppression_targets:
+        raise ValueError(
+            f"Model '{model_name}' does not support suppression_target='{suppression_target}'. "
+            f"Supported targets: {supported_suppression_targets}. "
+            f"For this model, use --suppression-target {supported_suppression_targets[0]}"
+        )
+
+    if verbose >= 2:
+        print(f"  Model capabilities:")
+        print(f"    - supports_force_close_thinking: {supports_force_close_thinking}")
+        print(f"    - supported_suppression_targets: {supported_suppression_targets}")
+        print(f"  Using suppression_target: {suppression_target}")
+
     client = OpenRouterClient(
         model=model_name,
         temperature=temperature,
         max_tokens=max_tokens,
         verbose=False,  # Disable API verbose logging for cleaner output
-        provider="SiliconFlow"
+        provider=provider  # Use configured providers (e.g., ["DeepInfra", "ncompass/fp8"] for qwen3-32b)
     )
 
     # Initialize LLM judge client if using llm_sentence detection
@@ -293,6 +340,9 @@ async def generate_with_suppression(
             (is_aware, awareness_count, aware_sentences, detection_details)
             detection_details: dict with 'method', 'score', 'category', etc.
         """
+        # Declare access to outer scope variables for tracking
+        nonlocal detection_judge_api_time, detection_judge_api_calls
+
         if detection_mode == "rule_based":
             # Use regex pattern matching
             awareness = analyze_awareness_levels(chunk)
@@ -339,6 +389,11 @@ async def generate_with_suppression(
                 category = result.get('category', 'Unknown')
                 test_reference_flag = result.get('test_reference_flag', 'no_test_reference')
 
+                # Track detection judge API time
+                if 'api_time' in result:
+                    detection_judge_api_time += result['api_time']
+                    detection_judge_api_calls += 1
+
                 # Track highest score and its metadata
                 if score > highest_score:
                     highest_score = score
@@ -381,9 +436,21 @@ async def generate_with_suppression(
     # Track API timing
     total_api_time = 0.0
     api_call_count = 0
+    suppression_model_api_time = 0.0
+    suppression_model_api_calls = 0
+    detection_judge_api_time = 0.0
+    detection_judge_api_calls = 0
 
     # Track if we should force close thinking tag (when reasoning is clean but no content generated)
     force_close_thinking = False
+
+    # Select appropriate initial reasoning based on strategy
+    if reasoning_strategy == "remove_only":
+        # Use all clean sentences (skip aware ones but keep all clean)
+        initial_reasoning = initial_reasoning_all
+    else:
+        # For remove_only_till_first, chunk_resample, seed, hybrid: use till_first
+        initial_reasoning = initial_reasoning_till_first
 
     # Accumulate clean reasoning and content separately
     # Start with any initial prefill provided
@@ -392,7 +459,7 @@ async def generate_with_suppression(
 
     if verbose and (initial_reasoning or initial_content):
         print(f"\n{'='*80}")
-        print(f"🌱 STARTING WITH INITIAL PREFILL")
+        print(f"🌱 STARTING WITH INITIAL PREFILL (strategy={reasoning_strategy})")
         print(f"{'='*80}")
         if initial_reasoning:
             print(f"  Initial reasoning: {len(initial_reasoning)} chars")
@@ -485,7 +552,62 @@ async def generate_with_suppression(
                 print(f"\n  🔧 PREFILL: (empty - first generation)")
             print()
 
-        # Build messages with prefill
+        # Handle deployment strategies (simple regeneration with modified system prompt)
+        if reasoning_strategy in ["system_prompt_deployment", "system_prompt_deployment_no_speculation", "system_prompt_taboo_words"]:
+            if verbose >= 2:
+                print(f"\n  📌 STRATEGY: {reasoning_strategy}")
+                print(f"     Direct generation with deployment system prompt")
+                print(f"     Generating full response (reasoning + content)...")
+
+            # Simple generation without any prefill or suppression
+            response = await client.generate(base_messages, max_tokens=4000)
+            total_api_time += response.api_time
+            api_call_count += 1
+            suppression_model_api_time += response.api_time
+            suppression_model_api_calls += 1
+
+            clean_reasoning = response.reasoning
+            clean_content = response.content
+
+            if verbose >= 2:
+                print(f"     ✓ Generated {len(clean_reasoning)} chars of reasoning")
+                print(f"     ✓ Generated {len(clean_content)} chars of content")
+
+            # Skip the rest of the loop - we're done
+            break
+
+        # Handle removal strategies (no resampling, just remove aware sentences)
+        if reasoning_strategy in ["remove_only", "remove_only_till_first"]:
+            if verbose >= 2:
+                print(f"\n  📌 STRATEGY: {reasoning_strategy}")
+                if reasoning_strategy == "remove_only":
+                    print(f"     Using ALL clean sentences ({len(clean_reasoning)} chars)")
+                else:
+                    print(f"     Using clean sentences up to first aware ({len(clean_reasoning)} chars)")
+                print(f"     Closing <thinking> tag and generating content...")
+
+            current_messages = client.format_messages_with_prefill(
+                base_messages=base_messages,
+                prefill_reasoning=clean_reasoning,
+                prefill_content="",
+                force_close_thinking=True
+            )
+
+            response = await client.generate(current_messages, max_tokens=4000)
+            total_api_time += response.api_time
+            api_call_count += 1
+            suppression_model_api_time += response.api_time
+            suppression_model_api_calls += 1
+
+            clean_content = response.content
+
+            if verbose >= 2:
+                print(f"     ✓ Generated {len(clean_content)} chars of content")
+
+            # Skip the rest of the loop - we're done
+            break
+
+        # Build messages with prefill (for chunk_resample strategy)
         current_messages = client.format_messages_with_prefill(
             base_messages=base_messages,
             prefill_content=clean_content,
@@ -513,6 +635,8 @@ async def generate_with_suppression(
         response = await client.generate(current_messages, max_tokens=generation_max_tokens, seed=generation_seed)
         total_api_time += response.api_time
         api_call_count += 1
+        suppression_model_api_time += response.api_time
+        suppression_model_api_calls += 1
 
         if verbose >= 2:
             print(f"\n  📥 RESPONSE (ThinkingResponse):")
@@ -598,10 +722,14 @@ async def generate_with_suppression(
                                 )
 
                                 # Regenerate reasoning continuation from clean prefix
-                                temp_clean_reasoning = ' '.join(clean_reasoning_chunks)
+                                # Include both: accumulated clean reasoning + clean chunks from this iteration before aware chunk
+                                if clean_reasoning_chunks:
+                                    temp_clean_reasoning = clean_reasoning + ''.join(clean_reasoning_chunks)
+                                else:
+                                    temp_clean_reasoning = clean_reasoning
 
                                 if verbose >= 2:
-                                    print(f"        PREFILL: {len(temp_clean_reasoning)} chars from {len(clean_reasoning_chunks)} clean chunks")
+                                    print(f"        PREFILL: {len(temp_clean_reasoning)} chars (base: {len(clean_reasoning)}, +{len(clean_reasoning_chunks)} chunks this iter)")
 
                                 regen_messages = client.format_messages_with_prefill(
                                     base_messages=base_messages,
@@ -609,9 +737,21 @@ async def generate_with_suppression(
                                     prefill_reasoning=temp_clean_reasoning
                                 )
 
+                                if verbose >= 3:
+                                    print(f"\n        📨 REASONING RESAMPLE REQUEST (attempt {attempt + 1}):")
+                                    print(f"        Resampling aware sentences ({len(r_chunk_sentences)} total):")
+                                    for i, sent in enumerate(r_chunk_sentences, 1):
+                                        sent_preview = sent[:150].replace('\n', ' ')
+                                        print(f"          [{i}] \"{sent_preview}...\"")
+                                    print(f"\n        REQUEST MESSAGES:")
+                                    print(json.dumps(regen_messages, indent=2))
+                                    print()
+
                                 regen_response = await client.generate(regen_messages, max_tokens=100, seed=resample_seed)
                                 total_api_time += regen_response.api_time
                                 api_call_count += 1
+                                suppression_model_api_time += regen_response.api_time
+                                suppression_model_api_calls += 1
                                 regen_reasoning = regen_response.reasoning
 
                                 if regen_reasoning:
@@ -677,12 +817,18 @@ async def generate_with_suppression(
                                     success=False
                                 ))
                                 if verbose >= 2:
-                                    print(f"        ✗ Failed to clean reasoning chunk")
+                                    print(f"        ✗ Failed to clean reasoning chunk after {max_resample_attempts_per_chunk} attempts")
                                 if reasoning_strategy == "chunk_resample":
-                                    # Pure chunk_resample failed, abort
+                                    # Pure chunk_resample failed, throw error immediately
                                     if verbose >= 2:
-                                        print(f"        🔍 DEBUG: Breaking from chunk loop (chunk_resample failed)")
-                                    break
+                                        print(f"        ⚠️  Max resample attempts exhausted for reasoning chunk - cannot continue")
+
+                                    # Raise exception with details
+                                    raise MaxResampleAttemptsExhausted(
+                                        chunk_index=r_idx,
+                                        max_attempts=max_resample_attempts_per_chunk,
+                                        aware_sentences=r_chunk_sentences
+                                    )
                                 else:
                                     # Hybrid: fall through to seeding
                                     if verbose >= 2:
@@ -706,13 +852,13 @@ async def generate_with_suppression(
                 # After processing all chunks, check results
                 if clean_reasoning_chunks and not aware_chunk_found:
                     # All reasoning chunks were clean! Add to accumulated reasoning
-                    clean_reasoning += ' '.join(clean_reasoning_chunks)
+                    clean_reasoning += ''.join(clean_reasoning_chunks)
                     handled = True
                     if verbose >= 2:
                         print(f"     ✓ All {len(clean_reasoning_chunks)} reasoning chunks clean")
                 elif clean_reasoning_chunks and reasoning_strategy == "chunk_resample":
                     # Got some clean chunks before hitting aware chunk
-                    clean_reasoning += ' '.join(clean_reasoning_chunks)
+                    clean_reasoning += ''.join(clean_reasoning_chunks)
                     handled = True
                     if verbose >= 2:
                         print(f"     ✓ Added {len(clean_reasoning_chunks)}/{len(reasoning_chunks)} clean reasoning chunks")
@@ -795,10 +941,14 @@ async def generate_with_suppression(
                     print(f"  ⚠️  Found awareness in reasoning, regenerating...")
                 else:
                     print(f"  ✓ Reasoning is clean ({len(clean_reasoning)} chars total)")
-                    print(f"  🔒 Closing thinking tag to force content generation...")
+                    if supports_force_close_thinking:
+                        print(f"  🔒 Closing thinking tag to force content generation...")
+                    else:
+                        print(f"  ⏭️  Letting model naturally transition to content (no force_close_thinking support)...")
 
             # Set flag to close thinking tag on next iteration if reasoning was clean
-            if not had_awareness_this_iteration and clean_reasoning:
+            # Only use force_close_thinking for models that support it
+            if not had_awareness_this_iteration and clean_reasoning and supports_force_close_thinking:
                 force_close_thinking = True
 
             # Next iteration will use clean_reasoning with closed tag if clean, or regenerate if aware
@@ -907,16 +1057,29 @@ async def generate_with_suppression(
 
                     # Regenerate from current prefix
                     # Force close thinking tag since we're in content generation mode now
+                    # (only if model supports it - otherwise let model transition naturally)
                     regen_messages = client.format_messages_with_prefill(
                         base_messages=base_messages,
                         prefill_content=clean_content,
                         prefill_reasoning=clean_reasoning,
-                        force_close_thinking=True
+                        force_close_thinking=supports_force_close_thinking
                     )
+
+                    if verbose >= 3:
+                        print(f"\n\n        📨 CONTENT RESAMPLE REQUEST (attempt {attempt + 1}):")
+                        print(f"        Resampling sentences ({len(chunk_aware_sentences)} total):")
+                        for i, sent in enumerate(chunk_aware_sentences, 1):
+                            sent_preview = sent[:150].replace('\n', ' ')
+                            print(f"          [{i}] \"{sent_preview}...\"")
+                        print(f"\n        REQUEST MESSAGES:")
+                        print(json.dumps(regen_messages, indent=2))
+                        print()
 
                     regen_response = await client.generate(regen_messages, max_tokens=100, seed=resample_seed)
                     total_api_time += regen_response.api_time
                     api_call_count += 1
+                    suppression_model_api_time += regen_response.api_time
+                    suppression_model_api_calls += 1
                     regen_content = regen_response.content
 
                     if not regen_content:
@@ -1110,7 +1273,11 @@ async def generate_with_suppression(
         all_detected_aware_sentences=all_detected_aware_sentences,
         chunk_resample_details=chunk_resample_details,
         total_api_time=total_api_time,
-        api_call_count=api_call_count
+        api_call_count=api_call_count,
+        suppression_model_api_time=suppression_model_api_time,
+        suppression_model_api_calls=suppression_model_api_calls,
+        detection_judge_api_time=detection_judge_api_time,
+        detection_judge_api_calls=detection_judge_api_calls
     )
 
 
@@ -1129,12 +1296,16 @@ def parse_into_chunks(text: str, strategy: str) -> List[str]:
         return []
 
     if strategy == "sentence":
-        # Split into sentences (same logic as analyze_awareness_levels)
+        # Split into sentences preserving spacing
+        # Split after sentence-ending punctuation, keeping trailing space with each sentence
         paragraphs = re.split(r'\n\n+', text)
         sentences = []
         for para in paragraphs:
-            para_sents = re.split(r'(?<=[.!?])\s+(?=[A-Z])', para)
-            sentences.extend([s.strip() for s in para_sents if s.strip()])
+            # Split right after punctuation, before whitespace and capital letter
+            # This preserves the natural spacing after each sentence
+            para_sents = re.split(r'(?<=[.!?])(?=\s+[A-Z])', para)
+            # Only filter completely empty strings, keep spacing intact
+            sentences.extend([s for s in para_sents if s.strip()])
         return sentences
     else:  # paragraph
         # Split on double newlines

@@ -4,8 +4,12 @@ Shared utility functions for the derisk project.
 """
 
 import re
+import logging
+import sys
 from typing import List, Dict, Tuple
 from dataclasses import dataclass
+from pathlib import Path
+from datetime import datetime
 
 @dataclass
 class AwarenessAnalysis:
@@ -25,6 +29,77 @@ class AwarenessAnalysis:
     # Combined (all awareness types)
     total_awareness_count: int
     highest_level: str  # "global", "explicit", "implicit", or "none"
+
+
+def setup_logging(
+    script_name: str,
+    log_subdir: str = "",
+    verbose: int = 0,
+    console_level: str = "INFO"
+) -> logging.Logger:
+    """
+    Set up logging to both file and console.
+
+    Args:
+        script_name: Name of the script (used for logger name and log filename)
+        log_subdir: Optional subdirectory under logs/ (e.g., "suppression_experiments")
+        verbose: Verbosity level (0=INFO, 1=DEBUG, 2=DEBUG with more detail)
+        console_level: Console logging level override (default: "INFO")
+
+    Returns:
+        Logger instance
+
+    Example:
+        logger = setup_logging("run_suppression_experiment", log_subdir="suppression_experiments", verbose=2)
+        logger.info("Starting experiment...")
+    """
+    # Create logs directory
+    if log_subdir:
+        log_dir = Path("logs") / log_subdir
+    else:
+        log_dir = Path("logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create timestamped log filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"{script_name}_{timestamp}.log"
+
+    # Create logger
+    logger = logging.getLogger(script_name)
+    logger.setLevel(logging.DEBUG)  # Capture all levels
+
+    # Remove existing handlers (in case setup_logging called multiple times)
+    logger.handlers = []
+
+    # File handler - always log at DEBUG level to file
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+
+    # Console handler - level depends on verbose flag
+    console_handler = logging.StreamHandler(sys.stdout)
+    if verbose >= 2:
+        console_handler.setLevel(logging.DEBUG)
+    elif verbose == 1:
+        console_handler.setLevel(logging.INFO)
+    else:
+        # Use provided console_level
+        console_handler.setLevel(getattr(logging, console_level.upper()))
+    console_formatter = logging.Formatter('%(message)s')
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+    # Don't propagate to root logger
+    logger.propagate = False
+
+    logger.info(f"📝 Logging to: {log_file}")
+
+    return logger
 
 
 def extract_eval_aware_sentences(assistant_response: str) -> List[str]:

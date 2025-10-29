@@ -106,7 +106,8 @@ async def categorize_rollout_file(
     batch_size: int,
     semaphore: asyncio.Semaphore,
     use_checksum: bool = True,
-    skip_existing: bool = False
+    skip_existing: bool = False,
+    verbose: bool = False
 ) -> bool:
     """Categorize sentences in a rollout file and save to categorization folder."""
     try:
@@ -165,9 +166,28 @@ async def categorize_rollout_file(
             if batch_size > 1:
                 batches = [all_sentences[i:i+batch_size] for i in range(0, len(all_sentences), batch_size)]
                 batch_results = []
-                for batch in batches:
+                for batch_idx, batch in enumerate(batches):
                     result = await score_batch(client, batch, judge_model, mode)
                     batch_results.extend(result)
+
+                    if verbose:
+                        print(f"\n{'='*80}")
+                        print(f"BATCH {batch_idx + 1}/{len(batches)} for {rollout_file.name}")
+                        print(f"{'='*80}")
+                        print(f"Batch size: {len(batch)}")
+                        print(f"Results returned: {len(result)}")
+                        if result:
+                            # Show first result details
+                            first = result[0]
+                            print(f"\nFirst result:")
+                            print(f"  Score: {first.get('score')}")
+                            print(f"  Category: {first.get('category')}")
+                            print(f"  Test Reference Flag: {first.get('test_reference_flag', 'N/A')}")
+                            print(f"  Reasoning (full): {first.get('reasoning', 'N/A')}")
+                            if 'raw_response' in first:
+                                print(f"\nFull raw response:")
+                                print(first['raw_response'])
+                        print(f"{'='*80}\n")
             else:
                 batch_results = []
                 for sentence in all_sentences:
@@ -175,16 +195,30 @@ async def categorize_rollout_file(
                     batch_results.extend(result)
 
         # Validate results - check for any errors from API
-        has_errors = any(
-            r.get('score', 0) == -1 or
-            r.get('category', '') == 'Error' or
-            'Error' in r.get('category', '')
-            for r in batch_results
-        )
+        error_results = [
+            (i, r) for i, r in enumerate(batch_results)
+            if r.get('score', 0) == -1 or r.get('category', '') == 'Error' or 'Error' in r.get('category', '')
+        ]
 
-        if has_errors:
-            error_count = sum(1 for r in batch_results if r.get('score', 0) == -1 or 'Error' in r.get('category', ''))
-            print(f"\nWARNING: Skipping {rollout_file.name} - {error_count}/{len(batch_results)} sentences have API errors")
+        if error_results:
+            print(f"\nWARNING: Skipping {rollout_file.name} - {len(error_results)}/{len(batch_results)} sentences have API errors")
+            for idx, err_result in error_results[:3]:  # Show first 3 errors
+                error_msg = err_result.get('reasoning', err_result.get('category', 'Unknown error'))
+                # Get the sentence text
+                sentence = all_sentences[idx] if idx < len(all_sentences) else "N/A"
+                words = sentence.split()
+                first_5 = ' '.join(words[:5]) if len(words) >= 5 else sentence
+                last_5 = ' '.join(words[-5:]) if len(words) >= 5 else sentence
+                print(f"  Sentence {idx}: {error_msg}")
+                print(f"    First 5 words: {first_5}")
+                print(f"    Last 5 words: {last_5}")
+
+                if verbose:
+                    print(f"    Full sentence: {sentence}")
+                    print(f"    Full reasoning: {err_result.get('reasoning', 'N/A')}")
+                    print(f"    Full raw response: {err_result.get('raw_response', 'N/A')}")
+            if len(error_results) > 3:
+                print(f"  ... and {len(error_results) - 3} more errors")
             return False
 
         # Split results back (order: deploy_thinking, deploy_visible, eval_thinking, eval_visible)
@@ -297,6 +331,8 @@ async def main():
                        help='Path to file containing prompt names to filter (YAML, CSV, or text format)')
     parser.add_argument('--mode', type=str, required=True, choices=['v0', 'v1'],
                        help='Prompt version to use (v0 or v1)')
+    parser.add_argument('--verbose', action='store_true',
+                       help='Show detailed debug output including full model responses')
 
     args = parser.parse_args()
 
@@ -333,6 +369,7 @@ async def main():
     print(f"Judge: {args.judge_model}")
     print(f"Batch size: {args.batch_size}")
     print(f"Concurrency: {args.concurrency}")
+    print(f"Verbose: {args.verbose}")
     print()
 
     # Initialize OpenRouter client
@@ -486,7 +523,7 @@ async def main():
     skip_existing = args.skip_existing
     semaphore = asyncio.Semaphore(args.concurrency)
     tasks = [
-        categorize_rollout_file(client, rollout, output, args.judge_model, args.mode, args.batch_size, semaphore, use_checksum, skip_existing)
+        categorize_rollout_file(client, rollout, output, args.judge_model, args.mode, args.batch_size, semaphore, use_checksum, skip_existing, args.verbose)
         for rollout, output in file_pairs
     ]
 
