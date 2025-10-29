@@ -490,7 +490,6 @@ def steer_and_generate(
                 for i, local_idx in enumerate(batch_indices):
                     source_file = batch_sources[i]
                     checksum = batch_checks[i]
-                    bucket = batch_bucket_list[i] if batch_bucket_list else 'unknown'
                     
                     # Create output filename based on source file with seed
                     base_name = os.path.splitext(os.path.basename(source_file))[0]
@@ -503,7 +502,6 @@ def steer_and_generate(
                     data = {
                         "source_file": source_file,
                         "checksum": checksum,
-                        "bucket": bucket,
                         "seed": seed,
                         "prompt": prompt_batch[i],
                         "system_prompt": sys_p,
