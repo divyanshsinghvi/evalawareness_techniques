@@ -46,7 +46,7 @@ class OpenRouterClient:
         top_p: float = 1,
         max_tokens: int = 4000,
         timeout: int = 300,
-        verbose: bool = False,
+        verbose: int = 0,
         provider: Optional[Union[str, List[str]]] = None,
         thinking_tag: Optional[str] = None
     ):
@@ -62,12 +62,12 @@ class OpenRouterClient:
         # Auto-detect thinking tag from model name if not provided
         if thinking_tag is None:
             self.thinking_tag = MODEL_THINKING_TAG_MAP.get(model, "think")
-            if verbose:
+            if verbose >= 2:
                 print(f"Auto-detected thinking tag: <{self.thinking_tag}> for model {model}")
         else:
             raise("Don't use put it in map the thinking token -_-")
             self.thinking_tag = thinking_tag
-            if verbose:
+            if verbose >= 2:
                 print(f"Using specified thinking tag: <{self.thinking_tag}>")
 
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
@@ -153,14 +153,14 @@ class OpenRouterClient:
         # Print timing
         print(f"  ⏱️  OpenRouter API call: {api_time:.2f}s")
 
-        if self.verbose:
+        if self.verbose >= 2:
             print(f"\n  Full API response:")
             import json
             print(json.dumps(result, indent=2))
 
         message = result["choices"][0]["message"]
 
-        if self.verbose:
+        if self.verbose >= 2:
             print(f"\n  Message object keys: {list(message.keys())}")
             print(f"  Message content:")
             for key, value in message.items():
@@ -174,6 +174,31 @@ class OpenRouterClient:
         reasoning = message.get("reasoning", "")
         content = message.get("content", "")
         raw_response = f"<{self.thinking_tag}>{reasoning}</{self.thinking_tag}>{content}" if reasoning else content
+
+        # Check for empty response and debug if verbose level 1
+        if self.verbose == 1 and not content:
+            import json
+            print(f"\n{'='*80}")
+            print(f"⚠️  EMPTY RESPONSE DETECTED (verbose level 1 debugging)")
+            print(f"{'='*80}")
+            print(f"\n📨 REQUEST:")
+            print(f"  Messages: {len(messages)} messages")
+            for i, msg in enumerate(messages):
+                role = msg.get('role', 'unknown')
+                msg_content = msg.get('content', '')
+                if len(msg_content) > 500:
+                    print(f"  [{i}] {role}: {msg_content[:500]}... (truncated from {len(msg_content)} chars)")
+                else:
+                    print(f"  [{i}] {role}: {msg_content}")
+
+            print(f"\n📥 RESPONSE:")
+            print(f"  API time: {api_time:.2f}s")
+            print(f"  Reasoning length: {len(reasoning)} chars")
+            print(f"  Content length: {len(content)} chars (EMPTY!)")
+            print(f"  Reasoning preview: {reasoning[:500] if reasoning else '(no reasoning)'}...")
+            print(f"\n  Full API response:")
+            print(json.dumps(result, indent=2))
+            print(f"{'='*80}\n")
 
         return ThinkingResponse(
             content=content,

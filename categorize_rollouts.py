@@ -174,6 +174,19 @@ async def categorize_rollout_file(
                     result = await score_batch(client, [sentence], judge_model, mode)
                     batch_results.extend(result)
 
+        # Validate results - check for any errors from API
+        has_errors = any(
+            r.get('score', 0) == -1 or
+            r.get('category', '') == 'Error' or
+            'Error' in r.get('category', '')
+            for r in batch_results
+        )
+
+        if has_errors:
+            error_count = sum(1 for r in batch_results if r.get('score', 0) == -1 or 'Error' in r.get('category', ''))
+            print(f"\nWARNING: Skipping {rollout_file.name} - {error_count}/{len(batch_results)} sentences have API errors")
+            return False
+
         # Split results back (order: deploy_thinking, deploy_visible, eval_thinking, eval_visible)
         idx = 0
         deployment_thinking_results = batch_results[idx:idx+len(deployment_thinking_sentences)]
@@ -306,7 +319,7 @@ async def main():
             return 1
 
     rollout_dir = config.ROLLOUTS_DIR / args.model_dir
-    categorization_dir = Path('working/categorization') / args.mode / args.model_dir
+    categorization_dir = config.SENTENCE_CATEGORIZATION_DIR / args.mode / args.model_dir
 
     if not rollout_dir.exists():
         print(f"Error: {rollout_dir} not found")
