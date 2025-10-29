@@ -41,16 +41,66 @@ JUDGE_BATCH_SIZE = 5
 
 # Suppression experiment settings (run_suppression_experiment.py)
 SUPPRESSION_TEMPERATURE = 0.7
-SUPPRESSION_MAX_TOKENS = 300
+SUPPRESSION_MAX_TOKENS = 700
 
 # ============================================================================
 # PROVIDER ROUTING
 # ============================================================================
 
-# OpenRouter provider preferences for specific models
-QWEN3_32B_PROVIDERS = {
-    "order": ["DeepInfra", "ncompass/fp8"],
-    "allow_fallbacks": False
+# Provider configurations for specific models
+# Maps model name (or substring) to provider preferences
+MODEL_PROVIDER_MAP = {
+    "qwen/qwen3-32b": {
+        "order": ["DeepInfra", "ncompass/fp8"],
+        "ignore": ["SiliconFlow"],  # Exclude SiliconFlow due to frequent 520 errors
+        "allow_fallbacks": False
+    },
+    "qwen/qwen3-30b-a3b-thinking-2507": {
+        "order": ["SiliconFlow"],  # SiliconFlow works well for this model
+        "allow_fallbacks": False
+    },
+    "x-ai/grok-4-fast": {
+        "order": ["xAI"],  # Use official xAI provider
+        "allow_fallbacks": False
+    },
+    "nvidia/llama-3.3-nemotron-super-49b-v1.5": {
+        "order": ["DeepInfra"],
+        "allow_fallbacks": False
+    },
+    # Add more models here as needed
+}
+
+# Legacy alias for backward compatibility
+QWEN3_32B_PROVIDERS = MODEL_PROVIDER_MAP["qwen/qwen3-32b"]
+
+# ============================================================================
+# MODEL CAPABILITIES
+# ============================================================================
+
+# Model capabilities for thinking token handling
+# Tracks whether models support force_close_thinking in prefill mode
+MODEL_CAPABILITIES = {
+    # Qwen models support force_close_thinking and all suppression targets
+    "qwen/qwen3-32b": {
+        "supports_force_close_thinking": True,
+        "supported_suppression_targets": ["reasoning_only", "full"]  # Can suppress in reasoning and/or content
+    },
+    "qwen/qwen3-30b-a3b-thinking-2507": {
+        "supports_force_close_thinking": True,
+        "supported_suppression_targets": ["reasoning_only", "full"]
+    },
+    "qwen/qwq-32b-preview": {
+        "supports_force_close_thinking": True,
+        "supported_suppression_targets": ["reasoning_only", "full"]
+    },
+    # Nvidia Nemotron does NOT support force_close_thinking
+    # It ignores pre-closed thinking tags and continues generating reasoning
+    # ONLY works with reasoning_only suppression target
+    "nvidia/llama-3.3-nemotron-super-49b-v1.5": {
+        "supports_force_close_thinking": False,
+        "supported_suppression_targets": ["reasoning_only"]  # Cannot reliably suppress in content
+    },
+    # Add more models here as needed
 }
 
 # ============================================================================
@@ -122,10 +172,52 @@ def get_model_safe_name(model: str) -> str:
 
 
 def get_provider_config(model: str) -> dict:
-    """Get provider configuration for a specific model."""
-    if "qwen3-32b" in model.lower():
-        return {"provider": QWEN3_32B_PROVIDERS}
+    """Get provider configuration for a specific model.
+
+    Args:
+        model: Model name (e.g., "qwen/qwen3-32b", "x-ai/grok-4-fast")
+
+    Returns:
+        dict with "provider" key containing provider preferences, or empty dict if no config
+    """
+    # Check exact match first
+    if model in MODEL_PROVIDER_MAP:
+        return {"provider": MODEL_PROVIDER_MAP[model]}
+
+    # Check substring match (case-insensitive)
+    model_lower = model.lower()
+    for key, config in MODEL_PROVIDER_MAP.items():
+        if key.lower() in model_lower:
+            return {"provider": config}
+
+    # No provider config for this model
     return {}
+
+
+def get_model_capabilities(model: str) -> dict:
+    """Get capabilities for a specific model.
+
+    Args:
+        model: Model name (e.g., "qwen/qwen3-32b", "nvidia/llama-3.3-nemotron-super-49b-v1.5")
+
+    Returns:
+        dict with model capabilities, defaults to supports_force_close_thinking=True and all targets if not found
+    """
+    # Check exact match first
+    if model in MODEL_CAPABILITIES:
+        return MODEL_CAPABILITIES[model]
+
+    # Check substring match (case-insensitive)
+    model_lower = model.lower()
+    for key, config in MODEL_CAPABILITIES.items():
+        if key.lower() in model_lower:
+            return config
+
+    # Default: assume model supports force_close_thinking and all suppression targets (most do)
+    return {
+        "supports_force_close_thinking": True,
+        "supported_suppression_targets": ["reasoning_only", "full"]
+    }
 
 
 def ensure_dirs():

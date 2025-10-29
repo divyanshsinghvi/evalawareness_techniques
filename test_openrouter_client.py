@@ -212,11 +212,11 @@ async def test_client():
 
         try:
             client = OpenRouterClient(
-                model="nvidia/llama-3.3-nemotron-super-49b-v1.5",
+                model="nvidia/llama-3.3-nemotron-super-49b-v1.5",  # Test with Nemotron
                 provider=provider,
                 temperature=0.7,  # Same as suppression experiment
                 max_tokens=100,
-                verbose=0
+                verbose=2  # Enable verbose to see full API payload with min_p
             )
 
             # Real prompt from the suppression experiment
@@ -234,27 +234,30 @@ async def test_client():
 
             print(f"\nClean seed length: {len(clean_seed)} chars")
 
-            # Test with different top_p values (nucleus sampling)
-            for top_p_val in [1.0, 0.5, 0.1, 0.01]:
+            # Test with different min_p values (minimum probability sampling)
+            for min_p_val in [0, 0.01, 0.05, 0.1, 1]:
                 print(f"\n{'='*60}")
-                print(f"Testing with top_p={top_p_val}, temperature=0.7")
+                print(f"Testing with min_p={min_p_val}, temperature=0.7")
                 print(f"{'='*60}")
 
-                for attempt in range(2):  # 2 attempts per top_p value
+                for attempt in range(2):  # 2 attempts per min_p value
                     prefilled_messages = client.format_messages_with_prefill(
                         base_messages=base_messages,
                         prefill_reasoning=clean_seed,
                         prefill_content=""
                     )
-
+                    
+                    print(prefilled_messages)
                     response = await client.generate(
                         prefilled_messages,
                         temperature=0.7,
-                        top_p=top_p_val,
+                        top_p=1.0,
+                        min_p=min_p_val,
                         seed=1000 + attempt * 100
                     )
 
-                    print(f"\n  Attempt {attempt + 1} (top_p={top_p_val}, seed={1000 + attempt * 100}):")
+                    print(response.finish_reason)
+                    print(f"\n  Attempt {attempt + 1} (min_p={min_p_val}, seed={1000 + attempt * 100}):")
                     print(f"    Reasoning length: {len(response.reasoning)} chars")
                     print(f"    First 200 chars: {response.reasoning[:200]}")
 
@@ -267,7 +270,7 @@ async def test_client():
                         print(f"    ✓ No obvious awareness keywords")
 
             print(f"\n{'='*80}")
-            print(f"Observation: Does low top_p (nucleus sampling) break the pattern?")
+            print(f"Observation: Does min_p (minimum probability sampling) break the pattern?")
             print(f"{'='*80}")
 
         except Exception as e:

@@ -20,6 +20,126 @@ from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Optional
 import re
+import numpy as np
+from scipy import stats
+
+
+def extract_prompt_id(filename: str) -> str:
+    """Extract base prompt ID from filename by removing seed suffix."""
+    # Remove _seed_N.yaml suffix
+    prompt_id = re.sub(r'_seed_\d+\.yaml$', '', filename)
+    return prompt_id
+
+
+def compute_clustered_stats(results: List[Dict], value_field: str) -> Dict:
+    """
+    Compute clustered statistics accounting for prompt-level correlation.
+
+    Args:
+        results: List of result dictionaries
+        value_field: Field name to analyze (e.g., 'suppressed_awareness')
+
+    Returns:
+        Dict with: mean, ci_lower, ci_upper, se, var_between, var_within,
+                   icc, n_prompts, n_seeds, n_eff, sd_between, sd_within
+    """
+    # Group by prompt
+    prompt_groups = defaultdict(list)
+    for r in results:
+        value = r
+        # Navigate nested dict structure for evaluation branch fields
+        for key in value_field.split('.'):
+            value = value.get(key) if isinstance(value, dict) else None
+            if value is None:
+                break
+
+        if value is not None:
+            prompt_id = extract_prompt_id(r['file'])
+            prompt_groups[prompt_id].append(value)
+
+    if not prompt_groups:
+        return None
+
+    # Compute prompt-level means
+    prompt_means = [np.mean(values) for values in prompt_groups.values()]
+    prompt_vars = [np.var(values, ddof=1) if len(values) > 1 else 0
+                   for values in prompt_groups.values()]
+
+    n_prompts = len(prompt_groups)
+    n_seeds = sum(len(values) for values in prompt_groups.values())
+    avg_cluster_size = n_seeds / n_prompts
+
+    # Variance decomposition
+    grand_mean = np.mean(prompt_means)
+    var_between = np.var(prompt_means, ddof=1) if n_prompts > 1 else 0
+    var_within = np.mean(prompt_vars)
+
+    # ICC
+    total_var = var_between + var_within
+    icc = var_between / total_var if total_var > 0 else 0
+
+    # Effective sample size
+    n_eff = n_seeds / (1 + (avg_cluster_size - 1) * icc) if icc > 0 else n_seeds
+
+    # Cluster-robust standard error
+    se_clustered = np.sqrt(var_between / n_prompts) if n_prompts > 0 else 0
+
+    # 95% CI using t-distribution
+    df = n_prompts - 1 if n_prompts > 1 else 1
+    t_crit = stats.t.ppf(0.975, df)
+    ci_lower = grand_mean - t_crit * se_clustered
+    ci_upper = grand_mean + t_crit * se_clustered
+
+    return {
+        'mean': grand_mean,
+        'ci_lower': ci_lower,
+        'ci_upper': ci_upper,
+        'se': se_clustered,
+        'var_between': var_between,
+        'var_within': var_within,
+        'sd_between': np.sqrt(var_between),
+        'sd_within': np.sqrt(var_within),
+        'icc': icc,
+        'n_prompts': n_prompts,
+        'n_seeds': n_seeds,
+        'n_eff': n_eff,
+    }
+
+
+def compute_bc_clustered_stats(results: List[Dict]) -> Dict:
+    """Compute clustered statistics for behavioral change (binary outcome)."""
+    # Group by prompt
+    prompt_groups = defaultdict(list)
+    for r in results:
+        if r['behavioral_change']['evaluation_flipped'] is not None:
+            prompt_id = extract_prompt_id(r['file'])
+            prompt_groups[prompt_id].append(1 if r['behavioral_change']['evaluation_flipped'] else 0)
+
+    if not prompt_groups:
+        return None
+
+    # Compute prompt-level BC rates
+    prompt_rates = [np.mean(data) for data in prompt_groups.values()]
+
+    n_prompts = len(prompt_groups)
+
+    # Overall rate
+    bc_rate = np.mean(prompt_rates) * 100
+
+    # SE using prompt-level variation
+    se = np.std(prompt_rates, ddof=1) / np.sqrt(n_prompts) * 100 if n_prompts > 1 else 0
+
+    # 95% CI
+    df = n_prompts - 1 if n_prompts > 1 else 1
+    t_crit = stats.t.ppf(0.975, df)
+
+    return {
+        'rate': bc_rate,
+        'ci_lower': bc_rate - t_crit * se,
+        'ci_upper': bc_rate + t_crit * se,
+        'n_prompts': n_prompts,
+        'n_seeds': sum(len(data) for data in prompt_groups.values()),
+    }
 
 
 def extract_choice(response: str) -> str:
@@ -118,20 +238,107 @@ def print_summary(results: List[Dict], bucket_data: Optional[Dict] = None):
     print(f"Note: Deployment branch is kept as-is (no eval context to suppress)")
     print()
 
-    # Evaluation branch stats
+    # Evaluation branch stats (with clustering correction)
     print(f"{'='*80}")
     print(f"EVALUATION BRANCH")
     print(f"{'='*80}")
-    eval_orig_avg = sum(r['evaluation']['original_awareness'] for r in results) / len(results)
-    eval_supp_avg = sum(r['evaluation']['suppressed_awareness'] for r in results) / len(results)
-    eval_reduction = eval_orig_avg - eval_supp_avg
 
-    print(f"Original awareness (avg):    {eval_orig_avg:.2f}")
-    print(f"Suppressed awareness (avg):  {eval_supp_avg:.2f}")
-    print(f"Reduction:                   {eval_reduction:.2f} ({eval_reduction/eval_orig_avg*100:.1f}% decrease)" if eval_orig_avg > 0 else "Reduction: N/A")
+    # Compute clustered stats for awareness
+    deploy_stats = compute_clustered_stats(results, 'deployment.awareness')
+    eval_orig_stats = compute_clustered_stats(results, 'evaluation.original_awareness')
+    eval_supp_stats = compute_clustered_stats(results, 'evaluation.suppressed_awareness')
 
+    if deploy_stats and eval_orig_stats and eval_supp_stats:
+        print(f"Deployment → Original → Suppressed:")
+        print(f"  {deploy_stats['mean']:.2f} (95%CI: {deploy_stats['ci_lower']:.2f}-{deploy_stats['ci_upper']:.2f}) → "
+              f"{eval_orig_stats['mean']:.2f} ({eval_orig_stats['ci_lower']:.2f}-{eval_orig_stats['ci_upper']:.2f}) → "
+              f"{eval_supp_stats['mean']:.2f} ({eval_supp_stats['ci_lower']:.2f}-{eval_supp_stats['ci_upper']:.2f})")
+
+        reduction = eval_orig_stats['mean'] - eval_supp_stats['mean']
+        reduction_pct = (reduction / eval_orig_stats['mean'] * 100) if eval_orig_stats['mean'] > 0 else 0
+        print(f"\nReduction: {reduction:.2f} ({reduction_pct:.1f}% decrease)")
+
+        print(f"\nStatistical Details (clustering-adjusted):")
+        print(f"  Prompts: {eval_orig_stats['n_prompts']}, Seeds/prompt: ~{eval_orig_stats['n_seeds']/eval_orig_stats['n_prompts']:.1f}, Total seeds: {eval_orig_stats['n_seeds']}")
+        print(f"\n  Deployment:  Between-SD={deploy_stats['sd_between']:.2f}, Within-SD={deploy_stats['sd_within']:.2f}, "
+              f"ICC={deploy_stats['icc']:.2f}, N_eff={deploy_stats['n_eff']:.0f}")
+        print(f"  Original:    Between-SD={eval_orig_stats['sd_between']:.2f}, Within-SD={eval_orig_stats['sd_within']:.2f}, "
+              f"ICC={eval_orig_stats['icc']:.2f}, N_eff={eval_orig_stats['n_eff']:.0f}")
+        print(f"  Suppressed:  Between-SD={eval_supp_stats['sd_between']:.2f}, Within-SD={eval_supp_stats['sd_within']:.2f}, "
+              f"ICC={eval_supp_stats['icc']:.2f}, N_eff={eval_supp_stats['n_eff']:.0f}")
+
+        print(f"\n  ICC Interpretation:")
+        avg_icc = (deploy_stats['icc'] + eval_orig_stats['icc'] + eval_supp_stats['icc']) / 3
+        if avg_icc < 0.1:
+            interp = "negligible clustering (seeds are nearly independent)"
+        elif avg_icc < 0.3:
+            interp = "moderate clustering (some prompt-level correlation)"
+        elif avg_icc < 0.5:
+            interp = "substantial clustering (strong prompt-level correlation)"
+        else:
+            interp = "high clustering (seeds within prompts very similar)"
+        print(f"    Avg ICC={avg_icc:.2f}: {interp}")
+    else:
+        # Fallback to simple stats if clustering fails
+        eval_orig_avg = sum(r['evaluation']['original_awareness'] for r in results) / len(results)
+        eval_supp_avg = sum(r['evaluation']['suppressed_awareness'] for r in results) / len(results)
+        eval_reduction = eval_orig_avg - eval_supp_avg
+        print(f"Original awareness (avg):    {eval_orig_avg:.2f}")
+        print(f"Suppressed awareness (avg):  {eval_supp_avg:.2f}")
+        print(f"Reduction:                   {eval_reduction:.2f} ({eval_reduction/eval_orig_avg*100:.1f}% decrease)" if eval_orig_avg > 0 else "Reduction: N/A")
+
+    # Behavioral change section
+    print(f"{'='*80}")
+    print(f"BEHAVIORAL CHANGE (Clustering-Corrected)")
+    print(f"{'='*80}")
+
+    bc_stats = compute_bc_clustered_stats(results)
     eval_flips = sum(1 for r in results if r['behavioral_change']['evaluation_flipped'])
-    print(f"Behavioral changes (choice flips): {eval_flips} / {len(results)} ({eval_flips/len(results)*100:.1f}%)")
+    if bc_stats:
+        print(f"Overall BC Rate (clustering-adjusted):")
+        print(f"  N prompts: {bc_stats['n_prompts']}, Total seeds: {bc_stats['n_seeds']}")
+        print(f"  BC rate (evaluation flips): {bc_stats['rate']:.1f}% "
+              f"(95%CI: {bc_stats['ci_lower']:.1f}%-{bc_stats['ci_upper']:.1f}%)")
+    else:
+        print(f"Behavioral changes (choice flips): {eval_flips} / {len(results)} ({eval_flips/len(results)*100:.1f}%)")
+
+    # BC breakdown by original awareness type
+    print(f"\nBC by Original Awareness Type (clustering-adjusted):")
+    awareness_types = ['self_test', 'other_test', 'no_test_reference']
+    for atype in awareness_types:
+        type_results = [r for r in results if r['evaluation']['original_type'] == atype]
+        if type_results:
+            type_bc_stats = compute_bc_clustered_stats(type_results)
+            if type_bc_stats:
+                print(f"  {atype}: N={type_bc_stats['n_prompts']} prompts ({len(type_results)} seeds)")
+                print(f"    BC rate: {type_bc_stats['rate']:.1f}% (95%CI: {type_bc_stats['ci_lower']:.1f}%-{type_bc_stats['ci_upper']:.1f}%)")
+
+    # BC breakdown by suppressed awareness type
+    print(f"\nBC by Suppressed Awareness Type (clustering-adjusted):")
+    for atype in awareness_types:
+        type_results = [r for r in results if r['evaluation']['suppressed_type'] == atype]
+        if type_results:
+            type_bc_stats = compute_bc_clustered_stats(type_results)
+            if type_bc_stats:
+                print(f"  {atype}: N={type_bc_stats['n_prompts']} prompts ({len(type_results)} seeds)")
+                print(f"    BC rate: {type_bc_stats['rate']:.1f}% (95%CI: {type_bc_stats['ci_lower']:.1f}%-{type_bc_stats['ci_upper']:.1f}%)")
+
+    # Awareness type transitions and BC impact
+    print(f"\nAwareness Type Transitions → BC Impact (clustering-adjusted):")
+    transitions = defaultdict(list)
+    for r in results:
+        orig_type = r['evaluation']['original_type']
+        supp_type = r['evaluation']['suppressed_type']
+        transition = f"{orig_type} → {supp_type}"
+        transitions[transition].append(r)
+
+    for transition, trans_results in sorted(transitions.items(), key=lambda x: len(x[1]), reverse=True):
+        if len(trans_results) >= 5:  # Only show transitions with 5+ seeds
+            trans_bc_stats = compute_bc_clustered_stats(trans_results)
+            if trans_bc_stats:
+                print(f"  {transition}: N={trans_bc_stats['n_prompts']} prompts ({len(trans_results)} seeds)")
+                print(f"    BC rate: {trans_bc_stats['rate']:.1f}% (95%CI: {trans_bc_stats['ci_lower']:.1f}%-{trans_bc_stats['ci_upper']:.1f}%)")
+    print()
 
     # Awareness type distribution
     print(f"\nOriginal awareness type distribution:")
@@ -221,16 +428,31 @@ def print_summary(results: List[Dict], bucket_data: Optional[Dict] = None):
                     bucket_name = prompt_to_bucket[base_prompt]
                     bucket_groups[bucket_name].append(r)
 
-        # Sort buckets by their percentile range
+        # Sort buckets by their percentile range (with clustering correction)
         bucket_order = ['10-25%', '25-50%', '50-75%', '75-100%']
         for bucket_name in bucket_order:
             if bucket_name in bucket_groups:
                 group = bucket_groups[bucket_name]
-                eval_orig_avg = sum(r['evaluation']['original_awareness'] for r in group) / len(group)
-                eval_supp_avg = sum(r['evaluation']['suppressed_awareness'] for r in group) / len(group)
-                reduction = eval_orig_avg - eval_supp_avg
-                reduction_pct = (reduction / eval_orig_avg * 100) if eval_orig_avg > 0 else 0
-                print(f"{bucket_name}: {len(group)} files, original={eval_orig_avg:.2f} → suppressed={eval_supp_avg:.2f} (reduction={reduction:.2f}, {reduction_pct:.1f}%)")
+
+                # Compute clustering-corrected stats for this bucket
+                bucket_orig_stats = compute_clustered_stats(group, 'evaluation.original_awareness')
+                bucket_supp_stats = compute_clustered_stats(group, 'evaluation.suppressed_awareness')
+
+                if bucket_orig_stats and bucket_supp_stats:
+                    reduction = bucket_orig_stats['mean'] - bucket_supp_stats['mean']
+                    reduction_pct = (reduction / bucket_orig_stats['mean'] * 100) if bucket_orig_stats['mean'] > 0 else 0
+                    print(f"{bucket_name}: {bucket_orig_stats['n_prompts']} prompts ({len(group)} seeds), "
+                          f"ICC_orig={bucket_orig_stats['icc']:.2f}, ICC_supp={bucket_supp_stats['icc']:.2f}")
+                    print(f"  Original:   {bucket_orig_stats['mean']:.2f} (95%CI: {bucket_orig_stats['ci_lower']:.2f}-{bucket_orig_stats['ci_upper']:.2f})")
+                    print(f"  Suppressed: {bucket_supp_stats['mean']:.2f} (95%CI: {bucket_supp_stats['ci_lower']:.2f}-{bucket_supp_stats['ci_upper']:.2f})")
+                    print(f"  Reduction:  {reduction:.2f} ({reduction_pct:.1f}%)")
+                else:
+                    # Fallback to simple stats
+                    eval_orig_avg = sum(r['evaluation']['original_awareness'] for r in group) / len(group)
+                    eval_supp_avg = sum(r['evaluation']['suppressed_awareness'] for r in group) / len(group)
+                    reduction = eval_orig_avg - eval_supp_avg
+                    reduction_pct = (reduction / eval_orig_avg * 100) if eval_orig_avg > 0 else 0
+                    print(f"{bucket_name}: {len(group)} files, original={eval_orig_avg:.2f} → suppressed={eval_supp_avg:.2f} (reduction={reduction:.2f}, {reduction_pct:.1f}%)")
 
     print()
     print(f"{'='*80}")
@@ -246,6 +468,8 @@ def main():
                        help='Recursively search subdirectories')
     parser.add_argument('--output-csv', type=str,
                        help='Save detailed results to CSV file')
+    parser.add_argument('--experiment-name', type=str,
+                       help='Name/label for this experiment (e.g., "chunk_resample", "remove_only")')
 
     args = parser.parse_args()
 
@@ -293,18 +517,25 @@ def main():
         import csv
         output_path = Path(args.output_csv)
 
+        # Add prompt_id to each result for clustering analysis
+        for r in results:
+            r['prompt_id'] = extract_prompt_id(r['file'])
+
         with open(output_path, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=[
-                'file', 'seed_removed_sentences', 'seed_removed_pct',
+                'file', 'prompt_id', 'experiment_name', 'seed_removed_sentences', 'seed_removed_pct',
                 'deploy_awareness', 'deploy_choice',
                 'eval_orig_awareness', 'eval_supp_awareness', 'eval_reduction',
                 'eval_orig_choice', 'eval_supp_choice', 'eval_flipped',
+                'eval_orig_type', 'eval_supp_type',
             ])
             writer.writeheader()
 
             for r in results:
                 writer.writerow({
                     'file': r['file'],
+                    'prompt_id': r['prompt_id'],
+                    'experiment_name': args.experiment_name if args.experiment_name else 'unknown',
                     'seed_removed_sentences': r['seed']['removed_sentences'],
                     'seed_removed_pct': f"{r['seed']['removed_pct']:.1f}",
                     'deploy_awareness': r['deployment']['awareness'],
@@ -315,6 +546,8 @@ def main():
                     'eval_orig_choice': r['evaluation']['original_choice'],
                     'eval_supp_choice': r['evaluation']['suppressed_choice'],
                     'eval_flipped': r['behavioral_change']['evaluation_flipped'],
+                    'eval_orig_type': r['evaluation']['original_type'],
+                    'eval_supp_type': r['evaluation']['suppressed_type'],
                 })
 
         print(f"Detailed results saved to: {output_path}")
