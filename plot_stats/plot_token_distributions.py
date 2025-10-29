@@ -3,10 +3,12 @@ Script to plot token length distributions for prompts in extracted_prompts direc
 
 Usage:
     python plot_token_distributions.py --model_id <hf_model_id> [--mode <explicit|implicit>] [--include_responses]
+    python plot_token_distributions.py --model_id <hf_model_id> --model_wise --model_name <model_name> --bucket <bucket_name>
 
 Examples:
     python plot_token_distributions.py --model_id "qwen/qwen3-32b" --mode explicit
     python plot_token_distributions.py --model_id "qwen/qwen3-32b" --mode explicit --include_responses
+    python plot_token_distributions.py --model_id "nvidia/llama-3.3-nemotron-super-49b-v1.5" --model_wise --model_name "nvidia_llama-3.3-nemotron-super-49b-v1.5" --bucket "high_awareness_bc"
 """
 
 import argparse
@@ -36,7 +38,7 @@ def parse_args():
         type=str,
         default="explicit",
         choices=["explicit", "implicit"],
-        help="Prompt mode: 'explicit' or 'implicit' (default: explicit)"
+        help="Prompt mode: 'explicit' or 'implicit' (default: explicit, ignored if --model_wise is set)"
     )
     parser.add_argument(
         "--output_dir",
@@ -49,11 +51,38 @@ def parse_args():
         action="store_true",
         help="Include model response token distributions in the analysis"
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--model_wise",
+        action="store_true",
+        help="Load prompts from steer_formatted_prompts instead of extracted_prompts"
+    )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default=None,
+        help="Model name for model_wise mode (e.g., 'qwen_qwen3-32b', required when --model_wise is set)"
+    )
+    parser.add_argument(
+        "--bucket",
+        type=str,
+        default=None,
+        help="Bucket name for model_wise mode (e.g., 'high_awareness_bc', 'high-awareness', 'others', required when --model_wise is set)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate that model_name and bucket are provided when model_wise is set
+    if args.model_wise:
+        if not args.model_name:
+            parser.error("--model_name is required when --model_wise is set")
+        if not args.bucket:
+            parser.error("--bucket is required when --model_wise is set")
+    
+    return args
 
 
 def load_prompts_from_yaml(yaml_path: str, include_responses: bool = False) -> Dict:
-    """Load prompts from a single YAML file."""
+    """Load prompts from a single YAML file (extracted_prompts format)."""
     try:
         with open(yaml_path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
@@ -86,6 +115,59 @@ def load_prompts_from_yaml(yaml_path: str, include_responses: bool = False) -> D
         return None
 
 
+def load_steer_formatted_prompts(bucket_dir: Path, include_responses: bool = False) -> List[Dict]:
+    """Load prompts from steer_formatted_prompts directory structure.
+    
+    Expected structure:
+        bucket_dir/
+            system_prompts.yaml
+            deploy_user.yaml
+            eval_user.yaml
+    
+    Each file contains a list of entries with: source_file, bucket, checksum, prompt
+    """
+    results = []
+    
+    try:
+        # Load all three files
+        system_path = bucket_dir / "system_prompts.yaml"
+        deploy_path = bucket_dir / "deploy_user.yaml"
+        eval_path = bucket_dir / "eval_user.yaml"
+        
+        if not all([system_path.exists(), deploy_path.exists(), eval_path.exists()]):
+            print(f"Warning: Missing required files in {bucket_dir}")
+            return results
+        
+        with open(system_path, 'r', encoding='utf-8') as f:
+            system_prompts = yaml.safe_load(f) or []
+        
+        with open(deploy_path, 'r', encoding='utf-8') as f:
+            deploy_prompts = yaml.safe_load(f) or []
+        
+        with open(eval_path, 'r', encoding='utf-8') as f:
+            eval_prompts = yaml.safe_load(f) or []
+        
+        # Create lookup dictionaries by checksum
+        system_by_checksum = {item['checksum']: item['prompt'] for item in system_prompts}
+        deploy_by_checksum = {item['checksum']: item['prompt'] for item in deploy_prompts}
+        eval_by_checksum = {item['checksum']: item['prompt'] for item in eval_prompts}
+        
+        # Match entries by checksum
+        for checksum in system_by_checksum.keys():
+            if checksum in deploy_by_checksum and checksum in eval_by_checksum:
+                results.append({
+                    'system_prompt': system_by_checksum[checksum],
+                    'user_deploy': deploy_by_checksum[checksum],
+                    'user_eval': eval_by_checksum[checksum],
+                    'checksum': checksum
+                })
+        
+        return results
+    except Exception as e:
+        print(f"Error loading from {bucket_dir}: {e}")
+        return results
+
+
 def get_token_count(tokenizer, text: str) -> int:
     """Get token count for a given text."""
     if not text or not isinstance(text, str):
@@ -98,10 +180,8 @@ def get_token_count(tokenizer, text: str) -> int:
         return 0
 
 
-def collect_token_lengths(prompts_dir: Path, tokenizer, include_responses: bool = False) -> Dict[str, List[int]]:
+def collect_token_lengths(prompts_dir: Path, tokenizer, include_responses: bool = False, model_wise: bool = False) -> Dict[str, List[int]]:
     """Collect token lengths for all prompts in the directory."""
-    yaml_files = list(prompts_dir.glob("*.yaml"))
-    
     token_lengths = {
         'system': [],
         'user_eval': [],
@@ -115,50 +195,90 @@ def collect_token_lengths(prompts_dir: Path, tokenizer, include_responses: bool 
         token_lengths['assistant_deploy'] = []
         token_lengths['assistant_eval'] = []
     
-    print(f"Processing {len(yaml_files)} YAML files...")
-    
-    for yaml_file in tqdm(yaml_files):
-        prompt_data = load_prompts_from_yaml(str(yaml_file), include_responses=include_responses)
+    if model_wise:
+        # Load from steer_formatted_prompts structure
+        # prompts_dir should point to a bucket directory with the three YAML files
+        prompt_data_list = load_steer_formatted_prompts(prompts_dir, include_responses=include_responses)
         
-        if prompt_data is None:
-            continue
+        if not prompt_data_list:
+            print(f"Warning: No prompts loaded from {prompts_dir}")
+            return token_lengths
         
-        sys_prompt = prompt_data['system_prompt']
-        user_deploy = prompt_data['user_deploy']
-        user_eval = prompt_data['user_eval']
+        print(f"Processing {len(prompt_data_list)} prompt entries...")
         
-        # Calculate token lengths
-        sys_len = get_token_count(tokenizer, sys_prompt)
-        user_deploy_len = get_token_count(tokenizer, user_deploy)
-        user_eval_len = get_token_count(tokenizer, user_eval)
-        
-        # Store individual lengths
-        token_lengths['system'].append(sys_len)
-        token_lengths['user_eval'].append(user_eval_len)
-        token_lengths['user_deploy'].append(user_deploy_len)
-        
-        # Calculate combined lengths
-        sys_user_eval_combined = sys_prompt + "\n\n" + user_eval
-        sys_user_deploy_combined = sys_prompt + "\n\n" + user_deploy
-        
-        token_lengths['sys_user_eval'].append(
-            get_token_count(tokenizer, sys_user_eval_combined)
-        )
-        token_lengths['sys_user_deploy'].append(
-            get_token_count(tokenizer, sys_user_deploy_combined)
-        )
-        
-        # Add response token lengths if requested
-        if include_responses:
-            assistant_deploy = prompt_data.get('assistant_deploy', '')
-            assistant_eval = prompt_data.get('assistant_eval', '')
+        for prompt_data in tqdm(prompt_data_list):
+            sys_prompt = prompt_data['system_prompt']
+            user_deploy = prompt_data['user_deploy']
+            user_eval = prompt_data['user_eval']
             
-            token_lengths['assistant_deploy'].append(
-                get_token_count(tokenizer, assistant_deploy)
+            # Calculate token lengths
+            sys_len = get_token_count(tokenizer, sys_prompt)
+            user_deploy_len = get_token_count(tokenizer, user_deploy)
+            user_eval_len = get_token_count(tokenizer, user_eval)
+            
+            # Store individual lengths
+            token_lengths['system'].append(sys_len)
+            token_lengths['user_eval'].append(user_eval_len)
+            token_lengths['user_deploy'].append(user_deploy_len)
+            
+            # Calculate combined lengths
+            sys_user_eval_combined = sys_prompt + "\n\n" + user_eval
+            sys_user_deploy_combined = sys_prompt + "\n\n" + user_deploy
+            
+            token_lengths['sys_user_eval'].append(
+                get_token_count(tokenizer, sys_user_eval_combined)
             )
-            token_lengths['assistant_eval'].append(
-                get_token_count(tokenizer, assistant_eval)
+            token_lengths['sys_user_deploy'].append(
+                get_token_count(tokenizer, sys_user_deploy_combined)
             )
+    else:
+        # Load from extracted_prompts structure
+        yaml_files = list(prompts_dir.glob("*.yaml"))
+        
+        print(f"Processing {len(yaml_files)} YAML files...")
+        
+        for yaml_file in tqdm(yaml_files):
+            prompt_data = load_prompts_from_yaml(str(yaml_file), include_responses=include_responses)
+            
+            if prompt_data is None:
+                continue
+            
+            sys_prompt = prompt_data['system_prompt']
+            user_deploy = prompt_data['user_deploy']
+            user_eval = prompt_data['user_eval']
+            
+            # Calculate token lengths
+            sys_len = get_token_count(tokenizer, sys_prompt)
+            user_deploy_len = get_token_count(tokenizer, user_deploy)
+            user_eval_len = get_token_count(tokenizer, user_eval)
+            
+            # Store individual lengths
+            token_lengths['system'].append(sys_len)
+            token_lengths['user_eval'].append(user_eval_len)
+            token_lengths['user_deploy'].append(user_deploy_len)
+            
+            # Calculate combined lengths
+            sys_user_eval_combined = sys_prompt + "\n\n" + user_eval
+            sys_user_deploy_combined = sys_prompt + "\n\n" + user_deploy
+            
+            token_lengths['sys_user_eval'].append(
+                get_token_count(tokenizer, sys_user_eval_combined)
+            )
+            token_lengths['sys_user_deploy'].append(
+                get_token_count(tokenizer, sys_user_deploy_combined)
+            )
+            
+            # Add response token lengths if requested
+            if include_responses:
+                assistant_deploy = prompt_data.get('assistant_deploy', '')
+                assistant_eval = prompt_data.get('assistant_eval', '')
+                
+                token_lengths['assistant_deploy'].append(
+                    get_token_count(tokenizer, assistant_deploy)
+                )
+                token_lengths['assistant_eval'].append(
+                    get_token_count(tokenizer, assistant_eval)
+                )
     
     return token_lengths
 
@@ -309,9 +429,17 @@ def main():
     """Main function."""
     args = parse_args()
     
-    # Determine the prompts directory
+    # Determine the prompts directory based on mode
     script_dir = Path(__file__).parent.parent.parent  # Go up to Sprint directory
-    prompts_dir = script_dir / "working" / "extracted_prompts" / "behavioral_change" / args.mode
+    
+    if args.model_wise:
+        # Load from steer_formatted_prompts/<model_name>/<bucket>
+        prompts_dir = script_dir / "working" / "steer_formatted_prompts" / args.model_name / args.bucket
+        mode_label = args.bucket
+    else:
+        # Load from extracted_prompts/behavioral_change/<mode>
+        prompts_dir = script_dir / "working" / "extracted_prompts" / "behavioral_change" / args.mode
+        mode_label = args.mode
     
     if not prompts_dir.exists():
         print(f"Error: Directory not found: {prompts_dir}")
@@ -330,7 +458,7 @@ def main():
     print(f"\nAnalyzing prompts from: {prompts_dir}")
     if args.include_responses:
         print("Including model response token distributions...")
-    token_lengths = collect_token_lengths(prompts_dir, tokenizer, args.include_responses)
+    token_lengths = collect_token_lengths(prompts_dir, tokenizer, args.include_responses, args.model_wise)
     
     # Determine output directory
     if args.output_dir:
@@ -339,11 +467,14 @@ def main():
         # Create a clean model name for directory
         model_name = args.model_id.replace("/", "_")
         suffix = "_with_responses" if args.include_responses else ""
-        output_dir = Path(__file__).parent / "plots" / f"{model_name}_{args.mode}{suffix}"
+        if args.model_wise:
+            output_dir = Path(__file__).parent / "plots" / f"{model_name}_modelwise_{args.model_name}_{args.bucket}{suffix}"
+        else:
+            output_dir = Path(__file__).parent / "plots" / f"{model_name}_{args.mode}{suffix}"
     
     # Create plots
     print(f"\nGenerating plots...")
-    plot_distributions(token_lengths, output_dir, args.model_id, args.mode, args.include_responses)
+    plot_distributions(token_lengths, output_dir, args.model_id, mode_label, args.include_responses)
     
     print("\n" + "="*80)
     print("COMPLETED!")
