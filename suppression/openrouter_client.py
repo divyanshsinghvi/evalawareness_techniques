@@ -21,6 +21,7 @@ class ThinkingResponse:
     raw_response: str  # Full response including thinking tags
     api_time: float = 0.0  # Time taken for API call in seconds
     thinking_closed: bool = False  # True if model closed </think> or </thinking>
+    finish_reason: str = ""  # Completion finish reason from API (stop, length, etc.)
 
 
 # Model name to thinking tag mapping
@@ -29,8 +30,8 @@ MODEL_THINKING_TAG_MAP = {
     "qwen/qwen3-32b": "think",  # qwen3-32b uses <think>
     "qwen/qwen3-30b-a3b-thinking-2507": "thinking",  # qwen3-30b uses <thinking>
     "qwen/qwq-32b-preview": "think",
-    # DeepSeek models use <think>
-    "deepseek/deepseek-r1": "think",
+    # Nvidia Nemotron uses <thinking>
+    "nvidia/llama-3.3-nemotron-super-49b-v1.5": "thinking",
     # Add more models here as needed
 }
 
@@ -44,6 +45,7 @@ class OpenRouterClient:
         api_key: Optional[str] = None,
         temperature: float = 0.7,
         top_p: float = 1,
+        min_p: float = 0,
         max_tokens: int = 4000,
         timeout: int = 300,
         verbose: int = 0,
@@ -54,6 +56,7 @@ class OpenRouterClient:
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         self.temperature = temperature
         self.top_p = top_p
+        self.min_p = min_p
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.verbose = verbose
@@ -65,7 +68,7 @@ class OpenRouterClient:
             if verbose >= 2:
                 print(f"Auto-detected thinking tag: <{self.thinking_tag}> for model {model}")
         else:
-            raise("Don't use put it in map the thinking token -_-")
+            # Allow manual override for testing purposes
             self.thinking_tag = thinking_tag
             if verbose >= 2:
                 print(f"Using specified thinking tag: <{self.thinking_tag}>")
@@ -81,7 +84,8 @@ class OpenRouterClient:
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        min_p: Optional[float] = None
     ) -> ThinkingResponse:
         """
         Generate completion from messages.
@@ -91,6 +95,8 @@ class OpenRouterClient:
             temperature: Override default temperature
             top_p: Override default top_p
             max_tokens: Override default max_tokens
+            seed: Random seed for reproducibility
+            min_p: Override default min_p (minimum probability threshold)
 
         Returns:
             ThinkingResponse with content, reasoning, and raw response
@@ -100,6 +106,8 @@ class OpenRouterClient:
             "Content-Type": "application/json",
         }
 
+        min_p_val = min_p if min_p is not None else self.min_p
+
         payload = {
             "model": self.model,
             "messages": messages,
@@ -108,6 +116,10 @@ class OpenRouterClient:
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
             "seed": seed if seed is not None else None
         }
+
+        # Add min_p if not 0 (0 means no filtering)
+        if min_p_val > 0:
+            payload["min_p"] = min_p_val
 
         # Add provider preference with no fallback if specified
         if self.provider:
@@ -150,8 +162,9 @@ class OpenRouterClient:
         if "choices" not in result or len(result["choices"]) == 0:
             raise RuntimeError(f"No choices in API response: {result}")
 
-        # Print timing
-        print(f"  ⏱️  OpenRouter API call: {api_time:.2f}s")
+        # Print timing only if verbose >= 1
+        if self.verbose >= 1:
+            print(f"  ⏱️  OpenRouter API call: {api_time:.2f}s")
 
         if self.verbose >= 2:
             print(f"\n  Full API response:")
@@ -175,6 +188,15 @@ class OpenRouterClient:
         content = message.get("content", "")
         raw_response = f"<{self.thinking_tag}>{reasoning}</{self.thinking_tag}>{content}" if reasoning else content
 
+        # Extract finish_reason from API response
+        choice = result["choices"][0]
+        finish_reason = choice.get("finish_reason", "")
+
+        # Determine if thinking was closed:
+        # - If content is non-empty, thinking tag was closed (model generated content outside thinking)
+        # - If content is empty, thinking tag was never closed (model only generated reasoning)
+        thinking_closed = len(content.strip()) > 0
+
         # Check for empty response and debug if verbose level 1
         if self.verbose == 1 and not content:
             import json
@@ -193,8 +215,10 @@ class OpenRouterClient:
 
             print(f"\n📥 RESPONSE:")
             print(f"  API time: {api_time:.2f}s")
+            print(f"  Finish reason: {finish_reason}")
             print(f"  Reasoning length: {len(reasoning)} chars")
             print(f"  Content length: {len(content)} chars (EMPTY!)")
+            print(f"  Thinking closed: {thinking_closed}")
             print(f"  Reasoning preview: {reasoning[:500] if reasoning else '(no reasoning)'}...")
             print(f"\n  Full API response:")
             print(json.dumps(result, indent=2))
@@ -204,7 +228,9 @@ class OpenRouterClient:
             content=content,
             reasoning=reasoning,
             raw_response=raw_response,
-            api_time=api_time
+            api_time=api_time,
+            thinking_closed=thinking_closed,
+            finish_reason=finish_reason
         )
 
     def format_messages_with_prefill(

@@ -161,11 +161,17 @@ def parse_steering_params(file_path: Path) -> Dict:
         'prompt_name': file_path.stem.replace('_steer_out', '')
     }
 
-    # Extract model name (first part after steered_categorization)
+    # Extract model name (first part after steered_categorization, skipping version folder if present)
     try:
         cat_idx = parts.index('steered_categorization')
         if cat_idx + 1 < len(parts):
-            params['model'] = parts[cat_idx + 1]
+            # Check if next part is a version folder (v0, v1, etc.)
+            next_part = parts[cat_idx + 1]
+            if re.match(r'^v\d+$', next_part) and cat_idx + 2 < len(parts):
+                # Skip version folder, get model from next part
+                params['model'] = parts[cat_idx + 2]
+            else:
+                params['model'] = parts[cat_idx + 1]
     except (ValueError, IndexError):
         pass
 
@@ -572,6 +578,8 @@ def main():
                        help='Filter by source (e.g., anthropic, tim)')
     parser.add_argument('--filter-branch', type=str,
                        help='Filter by branch (eval, deploy)')
+    parser.add_argument('--experiment-name', type=str,
+                       help='Name/label for this experiment (e.g., "tim_N4_S3.5", "anthropic_N4_S0.5")')
 
     args = parser.parse_args()
 
@@ -640,13 +648,14 @@ def main():
         import csv
         output_path = Path(args.output_csv)
 
-        # Add prompt_id to each result for clustering analysis
+        # Add prompt_id and experiment_name to each result for clustering analysis
         for r in results:
             r['prompt_id'] = extract_prompt_id(r['file'])
+            r['experiment_name'] = args.experiment_name if args.experiment_name else 'unknown'
 
         with open(output_path, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=[
-                'file', 'prompt_id', 'model', 'awareness_level', 'source', 'branch',
+                'file', 'prompt_id', 'experiment_name', 'model', 'awareness_level', 'source', 'branch',
                 'n_value', 's_value', 'prompt_name',
                 'deployment_intensity', 'original_intensity', 'steered_intensity', 'awareness_reduction',
                 'deployment_type', 'original_type', 'steered_type',

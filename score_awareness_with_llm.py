@@ -362,6 +362,8 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
     Args:
         mode: Prompt version to use ("v0" or "v1") - REQUIRED
     """
+    import time
+
     # Select prompt based on mode
     batch_prompt = BATCH_JUDGE_PROMPT_V1 if mode == "v1" else BATCH_JUDGE_PROMPT_V0
 
@@ -376,9 +378,12 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
 
     for attempt in range(max_retries):
         try:
-            # Build extra_body for OpenRouter provider routing
+            # Build extra_body for OpenRouter provider routing and disable reasoning tokens
             extra_body = config.get_provider_config(judge_model)
+            # Disable reasoning tokens for judge models (saves cost and tokens)
+            extra_body["reasoning"] = {"enabled": False}
 
+            start_time = time.time()
             response = await client.chat.completions.create(
                 model=judge_model,
                 messages=[
@@ -387,7 +392,7 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
                 ],
                 temperature=config.JUDGE_TEMPERATURE,
                 max_tokens=max_tokens,
-                extra_body=extra_body if extra_body else None
+                extra_body=extra_body
             )
 
             if not response or not response.choices:
@@ -402,13 +407,15 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
                 if finish_reason == 'length' and max_tokens < config.JUDGE_MAX_TOKENS_BATCH:
                     if attempt == max_retries - 1:
                         # Last attempt - return safe defaults instead of crashing
+                        api_time = time.time() - start_time
                         print(f"\nWARNING: Judge hit token limit after retries. Returning safe defaults for {len(sentences)} sentence(s)")
                         return [{
                             'score': 1,  # Conservative: assume not aware
                             'category': 'Error (token limit)',
                             'test_reference_flag': 'no_test_reference',
                             'reasoning': f'Judge hit token limit (finish_reason: {finish_reason})',
-                            'raw_response': ''
+                            'raw_response': '',
+                            'api_time': api_time
                         } for _ in sentences]
                     else:
                         # Retry with 2x tokens
@@ -454,7 +461,8 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
                         'category': result.get('category', 'Unknown'),
                         'test_reference_flag': result.get('test_reference_flag', 'no_test_reference'),
                         'reasoning': json.dumps(result),
-                        'raw_response': content
+                        'raw_response': content,
+                        'api_time': time.time() - start_time
                     })
                 except Exception as e:
                     # Individual sentence failed, add error result
@@ -462,7 +470,8 @@ async def score_batch(client: AsyncOpenAI, sentences: List[str], judge_model: st
                         'score': -1,
                         'category': 'Error',
                         'reasoning': f"Failed to parse: {e}",
-                        'raw_response': content
+                        'raw_response': content,
+                        'api_time': time.time() - start_time
                     })
 
             return parsed_results
@@ -481,7 +490,11 @@ async def score_sentence(client: AsyncOpenAI, sentence: str, judge_model: str, m
 
     Args:
         mode: Prompt version to use ("v0" or "v1") - REQUIRED
+        judge_model: Must be 'x-ai/grok-4-fast' for sentence scoring
     """
+    # Enforce model requirement for sentence scoring
+    assert judge_model == "x-ai/grok-4-fast", f"score_sentence requires 'x-ai/grok-4-fast', got: {judge_model}"
+
     results = await score_batch(client, [sentence], judge_model, mode, max_retries)
     return results[0] if results else {
         'score': -1,
@@ -497,8 +510,12 @@ async def score_response(client: AsyncOpenAI, response_text: str, judge_model: s
 
     Args:
         mode: Prompt version to use ("v0" or "v1") - REQUIRED
+        judge_model: Must be 'qwen/qwen3-32b' for response scoring
     """
     import time
+
+    # Enforce model requirement for response scoring
+    assert judge_model == "qwen/qwen3-32b", f"score_response requires 'qwen/qwen3-32b', got: {judge_model}"
 
     # Select prompt based on mode
     response_prompt = RESPONSE_JUDGE_PROMPT_V1 if mode == "v1" else RESPONSE_JUDGE_PROMPT_V0
@@ -510,8 +527,10 @@ async def score_response(client: AsyncOpenAI, response_text: str, judge_model: s
 
     for attempt in range(max_retries):
         try:
-            # Build extra_body for OpenRouter provider routing
+            # Build extra_body for OpenRouter provider routing and disable reasoning tokens
             extra_body = config.get_provider_config(judge_model)
+            # Disable reasoning tokens for judge models (saves cost and tokens)
+            extra_body["reasoning"] = {"enabled": False}
 
             start_time = time.time()
             response = await client.chat.completions.create(
@@ -522,7 +541,7 @@ async def score_response(client: AsyncOpenAI, response_text: str, judge_model: s
                 ],
                 temperature=config.JUDGE_TEMPERATURE,
                 max_tokens=max_tokens,
-                extra_body=extra_body if extra_body else None
+                extra_body=extra_body
             )
             api_time = time.time() - start_time
             print(f"  ⏱️  Judge API call: {api_time:.2f}s")
