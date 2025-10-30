@@ -426,8 +426,19 @@ Examples:
         # Parse prompt names from the file
         prompt_names = set()
 
+        # Check if it's a YAML file (high_awareness_bc_seeds.yaml format)
+        if prompt_list_path.suffix.lower() in ['.yaml', '.yml']:
+            with open(prompt_list_path) as f:
+                data = yaml.safe_load(f)
+
+            # Extract from eval_awareness_buckets structure
+            buckets = data.get('eval_awareness_buckets', {})
+            for bucket_name, prompts in buckets.items():
+                for prompt_id in prompts.keys():
+                    prompt_names.add(prompt_id)
+
         # Check if it's a CSV file
-        if prompt_list_path.suffix.lower() == '.csv':
+        elif prompt_list_path.suffix.lower() == '.csv':
             import csv
             with open(prompt_list_path) as f:
                 reader = csv.DictReader(f)

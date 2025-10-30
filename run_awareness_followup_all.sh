@@ -1,13 +1,15 @@
 #!/bin/bash
 # Run check_awareness_followup.py for all experiment variants
-# Usage: ./run_awareness_followup_all.sh [--skip EXPERIMENT_NAME] [--only EXPERIMENT_NAME] [--mode binary|ternary]
+# Usage: ./run_awareness_followup_all.sh [--skip EXPERIMENT_NAME] [--only EXPERIMENT_NAME] [--mode binary|ternary] [--verbose] [--concurrency N] [--model MODEL]
 
 set -e
 
-MODEL="qwen_qwen3-32b"
+EVALUATED_MODEL="qwen_qwen3-32b"  # The model being evaluated (filesystem-safe name for directory paths) - can be overridden with --model
+JUDGE_MODEL="qwen/qwen3-32b"  # The model that answers the follow-up question (API format, always fixed)
 MODE="ternary"  # binary (yes/no) or ternary (yes/no/unsure) - can be overridden with --mode
 LIMIT_SEEDS=29
 CONCURRENCY=100
+VERBOSE=""  # Set to "--verbose" to show detailed output
 
 # Parse command line arguments
 SKIP_EXPERIMENTS=()
@@ -31,9 +33,21 @@ while [[ $# -gt 0 ]]; do
             fi
             shift 2
             ;;
+        --verbose)
+            VERBOSE="--verbose"
+            shift 1
+            ;;
+        --concurrency)
+            CONCURRENCY="$2"
+            shift 2
+            ;;
+        --model)
+            EVALUATED_MODEL="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--skip EXPERIMENT_NAME] [--only EXPERIMENT_NAME] [--mode binary|ternary]"
+            echo "Usage: $0 [--skip EXPERIMENT_NAME] [--only EXPERIMENT_NAME] [--mode binary|ternary] [--verbose] [--concurrency N] [--model MODEL]"
             exit 1
             ;;
     esac
@@ -85,10 +99,11 @@ run_followup() {
     python awareness_probe/check_awareness_followup.py \
         --input-dir "$input_dir" \
         --file-type "$file_type" \
-        --model "$MODEL" \
+        --model "$JUDGE_MODEL" \
         --concurrency "$CONCURRENCY" \
         --mode "$MODE" \
         --skip-existing \
+        $VERBOSE \
         $extra_args
 
     echo "✓ Completed: $exp_name"
@@ -97,7 +112,8 @@ run_followup() {
 echo "═══════════════════════════════════════════════════════════════"
 echo "AWARENESS FOLLOWUP - ALL EXPERIMENTS"
 echo "═══════════════════════════════════════════════════════════════"
-echo "Model: $MODEL"
+echo "Evaluated Model: $EVALUATED_MODEL"
+echo "Judge Model: $JUDGE_MODEL"
 echo "Mode: $MODE"
 echo "Limit seeds: $LIMIT_SEEDS"
 echo "Concurrency: $CONCURRENCY"
@@ -108,6 +124,29 @@ if [ ${#ONLY_EXPERIMENTS[@]} -gt 0 ]; then
     echo "Only running: ${ONLY_EXPERIMENTS[*]}"
 fi
 echo "═══════════════════════════════════════════════════════════════"
+
+# ============================================================================
+# ROLLOUTS WITH PROMPT-LIST FILTERING (1 path) - RUN FIRST
+# ============================================================================
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "ROLLOUTS (with prompt-list filtering)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Use high_awareness_bc_seeds.yaml as the prompt list
+PROMPT_LIST="working/response_categorization/v1/$EVALUATED_MODEL/high_awareness_bc_seeds.yaml"
+
+if [ ! -f "$PROMPT_LIST" ]; then
+    echo "⚠️  Warning: Prompt list not found at $PROMPT_LIST"
+    echo "   Skipping rollouts processing."
+else
+    run_followup \
+        "rollouts" \
+        "rollout" \
+        "working/rollouts/$EVALUATED_MODEL" \
+        "--prompt-list $PROMPT_LIST"
+fi
 
 # ============================================================================
 # SUPPRESSION EXPERIMENTS (8 paths)
@@ -121,42 +160,42 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 run_followup \
     "sentence_resample_pick_if_not_evaly" \
     "suppression" \
-    "working/suppression_experiments/01_chunk_resample/llm_sentence_thresh_3_selfandother_reasoningonly_max_resample_10_temperature_07/$MODEL"
+    "working/suppression_experiments/01_chunk_resample/llm_sentence_thresh_3_selfandother_reasoningonly_max_resample_10_temperature_07/$EVALUATED_MODEL"
 
 run_followup \
     "sentence_resample_pick_least_eval_among_5" \
     "suppression" \
-    "working/suppression_experiments/06_resample_best_of_n5/llm_sentence_thresh_3_selfandother_reasoningonly/$MODEL"
+    "working/suppression_experiments/06_resample_best_of_n5/llm_sentence_thresh_3_selfandother_reasoningonly/$EVALUATED_MODEL"
 
 run_followup \
     "remove_only" \
     "suppression" \
-    "working/suppression_experiments/02_remove_only/llm_sentence_thresh_3_selfandother_reasoningonly/$MODEL"
+    "working/suppression_experiments/02_remove_only/llm_sentence_thresh_3_selfandother_reasoningonly/$EVALUATED_MODEL"
 
 run_followup \
     "system_prompt" \
     "suppression" \
-    "working/suppression_experiments/03_system_prompt_deployment/llm_sentence_thresh_3_selfandother_reasoningonly/$MODEL"
+    "working/suppression_experiments/03_system_prompt_deployment/llm_sentence_thresh_3_selfandother_reasoningonly/$EVALUATED_MODEL"
 
 run_followup \
     "system_prompt_no_spec" \
     "suppression" \
-    "working/suppression_experiments/04_system_prompt_deployment_no_speculation/llm_sentence_thresh_3_selfandother_reasoningonly/$MODEL"
+    "working/suppression_experiments/04_system_prompt_deployment_no_speculation/llm_sentence_thresh_3_selfandother_reasoningonly/$EVALUATED_MODEL"
 
 run_followup \
     "no_reasoning" \
     "suppression" \
-    "working/suppression_experiments/05_no_reasoning/llm_sentence_thresh_3_selfandother_full/$MODEL"
+    "working/suppression_experiments/05_no_reasoning/llm_sentence_thresh_3_selfandother_full/$EVALUATED_MODEL"
 
 run_followup \
     "sentence_resample_pick_least_eval_for_reasoning_and_content" \
     "suppression" \
-    "working/suppression_experiments/06_resample_best_of_n5_full/llm_sentence_thresh_3_selfandother_full/$MODEL"
+    "working/suppression_experiments/06_resample_best_of_n5_full/llm_sentence_thresh_3_selfandother_full/$EVALUATED_MODEL"
 
 run_followup \
     "only_final_answer" \
     "suppression" \
-    "working/suppression_experiments/07_strict_boxed_only/llm_sentence_thresh_3_selfandother_full/$MODEL"
+    "working/suppression_experiments/07_strict_boxed_only/llm_sentence_thresh_3_selfandother_full/$EVALUATED_MODEL"
 
 # ============================================================================
 # STEERING EXPERIMENTS (2 paths)
@@ -170,35 +209,12 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 run_followup \
     "tim_N4_S3.5" \
     "steered" \
-    "working/steered-outs/$MODEL/high_awareness_bc/tim/eval/N4_S3.5"
+    "working/steered-outs/$EVALUATED_MODEL/high_awareness_bc/tim/eval/N4_S3.5"
 
 run_followup \
     "anthropic_N4_S1.0" \
     "steered" \
-    "working/steered-outs/$MODEL/high_awareness_bc/anthropic/eval/N4_S1.0"
-
-# ============================================================================
-# ROLLOUTS WITH PROMPT-LIST FILTERING (1 path)
-# ============================================================================
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "ROLLOUTS (with prompt-list filtering)"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-# Use high_awareness_bc_seeds.yaml as the prompt list
-PROMPT_LIST="working/response_categorization/v1/$MODEL/high_awareness_bc_seeds.yaml"
-
-if [ ! -f "$PROMPT_LIST" ]; then
-    echo "⚠️  Warning: Prompt list not found at $PROMPT_LIST"
-    echo "   Skipping rollouts processing."
-else
-    run_followup \
-        "rollouts" \
-        "rollout" \
-        "working/rollouts/$MODEL" \
-        "--prompt-list $PROMPT_LIST"
-fi
+    "working/steered-outs/$EVALUATED_MODEL/high_awareness_bc/anthropic/eval/N4_S1.0"
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
