@@ -1,0 +1,204 @@
+#!/bin/bash
+# Run check_awareness_followup.py for all experiment variants
+# Usage: ./run_awareness_followup_all.sh [--skip EXPERIMENT_NAME] [--only EXPERIMENT_NAME] [--mode binary|ternary]
+
+set -e
+
+MODEL="qwen_qwen3-32b"
+MODE="ternary"  # binary (yes/no) or ternary (yes/no/unsure) - can be overridden with --mode
+LIMIT_SEEDS=29
+CONCURRENCY=100
+
+# Parse command line arguments
+SKIP_EXPERIMENTS=()
+ONLY_EXPERIMENTS=()
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --skip)
+            SKIP_EXPERIMENTS+=("$2")
+            shift 2
+            ;;
+        --only)
+            ONLY_EXPERIMENTS+=("$2")
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--skip EXPERIMENT_NAME] [--only EXPERIMENT_NAME]"
+            exit 1
+            ;;
+    esac
+done
+
+# Function to check if experiment should be skipped
+should_skip() {
+    local exp_name="$1"
+
+    # If --only is specified, skip everything except those experiments
+    if [ ${#ONLY_EXPERIMENTS[@]} -gt 0 ]; then
+        for only in "${ONLY_EXPERIMENTS[@]}"; do
+            if [ "$exp_name" == "$only" ]; then
+                return 1  # Don't skip
+            fi
+        done
+        return 0  # Skip
+    fi
+
+    # Check if in skip list
+    for skip in "${SKIP_EXPERIMENTS[@]}"; do
+        if [ "$exp_name" == "$skip" ]; then
+            return 0  # Skip
+        fi
+    done
+
+    return 1  # Don't skip
+}
+
+# Function to run awareness followup
+run_followup() {
+    local exp_name="$1"
+    local file_type="$2"
+    local input_dir="$3"
+    local extra_args="${4:-}"
+
+    if should_skip "$exp_name"; then
+        echo "⏭️  Skipping: $exp_name"
+        return 0
+    fi
+
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "Running: $exp_name"
+    echo "Type: $file_type"
+    echo "Input: $input_dir"
+    echo "═══════════════════════════════════════════════════════════════"
+
+    python awareness_probe/check_awareness_followup.py \
+        --input-dir "$input_dir" \
+        --file-type "$file_type" \
+        --model "$MODEL" \
+        --concurrency "$CONCURRENCY" \
+        --mode "$MODE" \
+        --skip-existing \
+        $extra_args
+
+    echo "✓ Completed: $exp_name"
+}
+
+echo "═══════════════════════════════════════════════════════════════"
+echo "AWARENESS FOLLOWUP - ALL EXPERIMENTS"
+echo "═══════════════════════════════════════════════════════════════"
+echo "Model: $MODEL"
+echo "Mode: $MODE"
+echo "Limit seeds: $LIMIT_SEEDS"
+echo "Concurrency: $CONCURRENCY"
+if [ ${#SKIP_EXPERIMENTS[@]} -gt 0 ]; then
+    echo "Skipping: ${SKIP_EXPERIMENTS[*]}"
+fi
+if [ ${#ONLY_EXPERIMENTS[@]} -gt 0 ]; then
+    echo "Only running: ${ONLY_EXPERIMENTS[*]}"
+fi
+echo "═══════════════════════════════════════════════════════════════"
+
+# ============================================================================
+# SUPPRESSION EXPERIMENTS (8 paths)
+# ============================================================================
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "SUPPRESSION EXPERIMENTS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+run_followup \
+    "sentence_resample_pick_if_not_evaly" \
+    "suppression" \
+    "working/suppression_experiments/01_chunk_resample/llm_sentence_thresh_3_selfandother_reasoningonly_max_resample_10_temperature_07/$MODEL"
+
+run_followup \
+    "sentence_resample_pick_least_eval_among_5" \
+    "suppression" \
+    "working/suppression_experiments/06_resample_best_of_n5/llm_sentence_thresh_3_selfandother_reasoningonly/$MODEL"
+
+run_followup \
+    "remove_only" \
+    "suppression" \
+    "working/suppression_experiments/02_remove_only/llm_sentence_thresh_3_selfandother_reasoningonly/$MODEL"
+
+run_followup \
+    "system_prompt" \
+    "suppression" \
+    "working/suppression_experiments/03_system_prompt_deployment/llm_sentence_thresh_3_selfandother_reasoningonly/$MODEL"
+
+run_followup \
+    "system_prompt_no_spec" \
+    "suppression" \
+    "working/suppression_experiments/04_system_prompt_deployment_no_speculation/llm_sentence_thresh_3_selfandother_reasoningonly/$MODEL"
+
+run_followup \
+    "no_reasoning" \
+    "suppression" \
+    "working/suppression_experiments/05_no_reasoning/llm_sentence_thresh_3_selfandother_full/$MODEL"
+
+run_followup \
+    "sentence_resample_pick_least_eval_for_reasoning_and_content" \
+    "suppression" \
+    "working/suppression_experiments/06_resample_best_of_n5_full/llm_sentence_thresh_3_selfandother_full/$MODEL"
+
+run_followup \
+    "only_final_answer" \
+    "suppression" \
+    "working/suppression_experiments/07_strict_boxed_only/llm_sentence_thresh_3_selfandother_full/$MODEL"
+
+# ============================================================================
+# STEERING EXPERIMENTS (2 paths)
+# ============================================================================
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEERING EXPERIMENTS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+run_followup \
+    "tim_N4_S3.5" \
+    "steered" \
+    "working/steered-outs/$MODEL/high_awareness_bc/tim/eval/N4_S3.5"
+
+run_followup \
+    "anthropic_N4_S1.0" \
+    "steered" \
+    "working/steered-outs/$MODEL/high_awareness_bc/anthropic/eval/N4_S1.0"
+
+# ============================================================================
+# ROLLOUTS WITH PROMPT-LIST FILTERING (1 path)
+# ============================================================================
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "ROLLOUTS (with prompt-list filtering)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Use high_awareness_bc_seeds.yaml as the prompt list
+PROMPT_LIST="working/response_categorization/v1/$MODEL/high_awareness_bc_seeds.yaml"
+
+if [ ! -f "$PROMPT_LIST" ]; then
+    echo "⚠️  Warning: Prompt list not found at $PROMPT_LIST"
+    echo "   Skipping rollouts processing."
+else
+    run_followup \
+        "rollouts" \
+        "rollout" \
+        "working/rollouts/$MODEL" \
+        "--prompt-list $PROMPT_LIST"
+fi
+
+echo ""
+echo "═══════════════════════════════════════════════════════════════"
+echo "✓ ALL EXPERIMENTS COMPLETED"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+echo "Output locations:"
+echo "  Suppression: working/awareness_yes_no_unsure/suppression/"
+echo "  Steering:    working/awareness_yes_no_unsure/steered/"
+echo "  Rollouts:    working/awareness_yes_no_unsure/rollout/"
+echo "═══════════════════════════════════════════════════════════════"
