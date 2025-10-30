@@ -360,6 +360,8 @@ Examples:
                        help='Number of concurrent API calls (default: 5)')
     parser.add_argument('--limit', type=int, default=None,
                        help='Limit number of files to process')
+    parser.add_argument('--max-seed', type=int, default=None,
+                       help='Only process files with seed <= this value (e.g., --max-seed 29 for seeds 0-29)')
     parser.add_argument('--prompt-name', type=str, default=None,
                        help='Filter to specific prompt name (e.g., "deception_2025-10-24_04-25-40_ced2d7e1")')
     parser.add_argument('--prompt-list', type=str, default=None,
@@ -492,6 +494,19 @@ Examples:
                     filtered_files.append(f)
         files = filtered_files
         print(f"Filtered to prompt '{args.prompt_name}': {len(files)} files")
+
+    # Filter by max seed if specified
+    if args.max_seed is not None:
+        filtered_files = []
+        for f in files:
+            # Extract seed number
+            match = re.match(r'.+_seed_(\d+)\.yaml$', f.name)
+            if match:
+                seed = int(match.group(1))
+                if seed <= args.max_seed:
+                    filtered_files.append(f)
+        print(f"Filtered to seeds 0-{args.max_seed}: {len(files)} -> {len(filtered_files)} files")
+        files = filtered_files
 
     if args.limit:
         files = files[:args.limit]

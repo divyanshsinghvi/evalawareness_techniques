@@ -102,6 +102,7 @@ run_followup() {
         --model "$JUDGE_MODEL" \
         --concurrency "$CONCURRENCY" \
         --mode "$MODE" \
+        --max-seed "$LIMIT_SEEDS" \
         --skip-existing \
         $VERBOSE \
         $extra_args
