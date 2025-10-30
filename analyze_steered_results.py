@@ -126,6 +126,12 @@ def compute_bc_clustered_stats(results: List[Dict]) -> Dict:
     se_orig = np.std(prompt_orig_rates, ddof=1) / np.sqrt(n_prompts) * 100 if n_prompts > 1 else 0
     se_steered = np.std(prompt_steered_rates, ddof=1) / np.sqrt(n_prompts) * 100 if n_prompts > 1 else 0
 
+    # Compute delta (steered - orig) and its SE
+    # Since these are paired (same prompts), compute prompt-level deltas
+    prompt_deltas = [(steered - orig) * 100 for orig, steered in zip(prompt_orig_rates, prompt_steered_rates)]
+    delta_mean = np.mean(prompt_deltas)
+    se_delta = np.std(prompt_deltas, ddof=1) / np.sqrt(n_prompts) if n_prompts > 1 else 0
+
     # 95% CI
     df = n_prompts - 1 if n_prompts > 1 else 1
     t_crit = stats.t.ppf(0.975, df)
@@ -137,6 +143,9 @@ def compute_bc_clustered_stats(results: List[Dict]) -> Dict:
         'orig_ci_upper': orig_rate + t_crit * se_orig,
         'steered_ci_lower': steered_rate - t_crit * se_steered,
         'steered_ci_upper': steered_rate + t_crit * se_steered,
+        'delta_mean': delta_mean,
+        'delta_ci_lower': delta_mean - t_crit * se_delta,
+        'delta_ci_upper': delta_mean + t_crit * se_delta,
         'n_prompts': n_prompts,
     }
 
@@ -338,32 +347,24 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
         steered_stats = compute_clustered_stats(results_with_deploy, 'steered_intensity')
 
         if deploy_stats and orig_stats and steered_stats:
-            print(f"Deployment → Original Eval → Steered Eval:")
-            print(f"  {deploy_stats['mean']:.2f} (95%CI: {deploy_stats['ci_lower']:.2f}-{deploy_stats['ci_upper']:.2f}) → "
-                  f"{orig_stats['mean']:.2f} ({orig_stats['ci_lower']:.2f}-{orig_stats['ci_upper']:.2f}) → "
-                  f"{steered_stats['mean']:.2f} ({steered_stats['ci_lower']:.2f}-{steered_stats['ci_upper']:.2f})")
+            # Main awareness table
+            print(f"\n{'Condition':<20} {'Mean':>8} {'95% CI':>20} {'Reduction':>12}")
+            print(f"{'-'*20} {'-'*8} {'-'*20} {'-'*12}")
+            print(f"{'Deployment':<20} {deploy_stats['mean']:>8.2f} {f'[{deploy_stats['ci_lower']:.2f}, {deploy_stats['ci_upper']:.2f}]':>20} {'-':>12}")
+            print(f"{'Original Eval':<20} {orig_stats['mean']:>8.2f} {f'[{orig_stats['ci_lower']:.2f}, {orig_stats['ci_upper']:.2f}]':>20} {'-':>12}")
+            orig_reduction = orig_stats['mean'] - deploy_stats['mean']
+            print(f"{'Steered Eval':<20} {steered_stats['mean']:>8.2f} {f'[{steered_stats['ci_lower']:.2f}, {steered_stats['ci_upper']:.2f}]':>20} {steered_stats['mean'] - orig_stats['mean']:>12.2f}")
 
-            print(f"\nStatistical Details (clustering-adjusted):")
-            print(f"  Prompts: {deploy_stats['n_prompts']}, Seeds/prompt: ~{deploy_stats['n_seeds']/deploy_stats['n_prompts']:.1f}, Total seeds: {deploy_stats['n_seeds']}")
+            print(f"\nSample: {deploy_stats['n_prompts']} prompts, {deploy_stats['n_seeds']} seeds (~{deploy_stats['n_seeds']/deploy_stats['n_prompts']:.0f} seeds/prompt)")
 
-            print(f"\n  Deployment:  Between-SD={deploy_stats['sd_between']:.2f}, Within-SD={deploy_stats['sd_within']:.2f}, "
-                  f"ICC={deploy_stats['icc']:.2f}, N_eff={deploy_stats['n_eff']:.0f}")
-            print(f"  Original:    Between-SD={orig_stats['sd_between']:.2f}, Within-SD={orig_stats['sd_within']:.2f}, "
-                  f"ICC={orig_stats['icc']:.2f}, N_eff={orig_stats['n_eff']:.0f}")
-            print(f"  Steered:     Between-SD={steered_stats['sd_between']:.2f}, Within-SD={steered_stats['sd_within']:.2f}, "
-                  f"ICC={steered_stats['icc']:.2f}, N_eff={steered_stats['n_eff']:.0f}")
-
-            print(f"\n  ICC Interpretation:")
+            # Clustering stats table
             avg_icc = (deploy_stats['icc'] + orig_stats['icc'] + steered_stats['icc']) / 3
-            if avg_icc < 0.1:
-                interp = "negligible clustering (seeds are nearly independent)"
-            elif avg_icc < 0.3:
-                interp = "moderate clustering (some prompt-level correlation)"
-            elif avg_icc < 0.5:
-                interp = "substantial clustering (strong prompt-level correlation)"
-            else:
-                interp = "high clustering (seeds within prompts very similar)"
-            print(f"    Avg ICC={avg_icc:.2f}: {interp}")
+            print(f"\n{'Condition':<20} {'ICC':>6} {'N_eff':>8}")
+            print(f"{'-'*20} {'-'*6} {'-'*8}")
+            print(f"{'Deployment':<20} {deploy_stats['icc']:>6.2f} {deploy_stats['n_eff']:>8.0f}")
+            print(f"{'Original Eval':<20} {orig_stats['icc']:>6.2f} {orig_stats['n_eff']:>8.0f}")
+            print(f"{'Steered Eval':<20} {steered_stats['icc']:>6.2f} {steered_stats['n_eff']:>8.0f}")
+            print(f"{'Average':<20} {avg_icc:>6.2f}")
 
     elif results_with_orig:
         orig_stats = compute_clustered_stats(results_with_orig, 'original_intensity')
@@ -380,18 +381,24 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
     for r in results:
         type_counts[r['steered_type']] += 1
 
-    print(f"\nSteered awareness type distribution:")
-    for atype, count in sorted(type_counts.items(), key=lambda x: x[1], reverse=True):
-        pct = (count / len(results)) * 100
-        print(f"  {atype}: {count} ({pct:.1f}%)")
-
     if results_with_orig:
-        print(f"\nOriginal awareness type distribution:")
+        print(f"\n{'Awareness Type':<25} {'Original':>15} {'Steered':>15} {'Change':>10}")
+        print(f"{'-'*25} {'-'*15} {'-'*15} {'-'*10}")
         orig_type_counts = defaultdict(int)
         for r in results_with_orig:
             orig_type_counts[r['original_type']] += 1
-        for atype, count in sorted(orig_type_counts.items(), key=lambda x: x[1], reverse=True):
-            pct = (count / len(results_with_orig)) * 100
+
+        for atype in ['no_test_reference', 'other_test', 'self_test']:
+            orig_count = orig_type_counts.get(atype, 0)
+            orig_pct = (orig_count / len(results_with_orig)) * 100
+            steer_count = type_counts.get(atype, 0)
+            steer_pct = (steer_count / len(results)) * 100
+            change = steer_pct - orig_pct
+            print(f"{atype:<25} {f'{orig_count} ({orig_pct:.1f}%)':>15} {f'{steer_count} ({steer_pct:.1f}%)':>15} {change:>9.1f}%")
+    else:
+        print(f"\nSteered awareness type distribution:")
+        for atype, count in sorted(type_counts.items(), key=lambda x: x[1], reverse=True):
+            pct = (count / len(results)) * 100
             print(f"  {atype}: {count} ({pct:.1f}%)")
     print()
 
@@ -407,41 +414,41 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
         bc_stats = compute_bc_clustered_stats(results_with_bc)
 
         if bc_stats:
-            print(f"Overall BC Rates (clustering-adjusted):")
-            print(f"  N prompts: {bc_stats['n_prompts']}, Total seeds with BC data: {len(results_with_bc)}")
-            print(f"  Original BC rate (deploy→eval): {bc_stats['orig_rate']:.1f}% "
-                  f"(95%CI: {bc_stats['orig_ci_lower']:.1f}%-{bc_stats['orig_ci_upper']:.1f}%)")
-            print(f"  Steered BC rate (deploy→steered): {bc_stats['steered_rate']:.1f}% "
-                  f"(95%CI: {bc_stats['steered_ci_lower']:.1f}%-{bc_stats['steered_ci_upper']:.1f}%)")
-            print(f"  BC rate change: {bc_stats['steered_rate'] - bc_stats['orig_rate']:+.1f}%")
+            print(f"\nSample: {bc_stats['n_prompts']} prompts, {len(results_with_bc)} seeds")
+            print(f"\n{'Condition':<20} {'BC Rate':>10} {'95% CI':>20} {'Change':>12} {'Change 95% CI':>25}")
+            print(f"{'-'*20} {'-'*10} {'-'*20} {'-'*12} {'-'*25}")
+            print(f"{'Original (D→E)':<20} {bc_stats['orig_rate']:>9.1f}% {f'[{bc_stats['orig_ci_lower']:.1f}, {bc_stats['orig_ci_upper']:.1f}]':>20} {'-':>12} {'-':>25}")
+            delta_ci_str = f"[{bc_stats['delta_ci_lower']:.1f}, {bc_stats['delta_ci_upper']:.1f}]"
+            print(f"{'Steered (D→S)':<20} {bc_stats['steered_rate']:>9.1f}% {f'[{bc_stats['steered_ci_lower']:.1f}, {bc_stats['steered_ci_upper']:.1f}]':>20} {bc_stats['delta_mean']:>11.1f}% {delta_ci_str:>25}")
 
         # BC breakdown by original awareness type
-        print(f"\nBC by Original Awareness Type (clustering-adjusted):")
+        print(f"\n{'Original Type':<25} {'N':>12} {'Orig BC':>10} {'Steer BC':>10} {'Change':>10}")
+        print(f"{'-'*25} {'-'*12} {'-'*10} {'-'*10} {'-'*10}")
         awareness_types = ['self_test', 'other_test', 'no_test_reference']
         for atype in awareness_types:
             type_bc_results = [r for r in results_with_bc if r['original_type'] == atype]
             if type_bc_results:
                 type_bc_stats = compute_bc_clustered_stats(type_bc_results)
                 if type_bc_stats:
-                    print(f"  {atype}: N={type_bc_stats['n_prompts']} prompts ({len(type_bc_results)} seeds)")
-                    print(f"    Original: {type_bc_stats['orig_rate']:.1f}% (95%CI: {type_bc_stats['orig_ci_lower']:.1f}%-{type_bc_stats['orig_ci_upper']:.1f}%)")
-                    print(f"    Steered:  {type_bc_stats['steered_rate']:.1f}% (95%CI: {type_bc_stats['steered_ci_lower']:.1f}%-{type_bc_stats['steered_ci_upper']:.1f}%)")
-                    print(f"    Change:   {type_bc_stats['steered_rate']-type_bc_stats['orig_rate']:+.1f}%")
+                    print(f"{atype:<25} {f'{type_bc_stats['n_prompts']}p/{len(type_bc_results)}s':>12} "
+                          f"{type_bc_stats['orig_rate']:>9.1f}% {type_bc_stats['steered_rate']:>9.1f}% "
+                          f"{type_bc_stats['steered_rate']-type_bc_stats['orig_rate']:>9.1f}%")
 
         # BC breakdown by steered awareness type
-        print(f"\nBC by Steered Awareness Type (clustering-adjusted):")
+        print(f"\n{'Steered Type':<25} {'N':>12} {'Orig BC':>10} {'Steer BC':>10} {'Change':>10}")
+        print(f"{'-'*25} {'-'*12} {'-'*10} {'-'*10} {'-'*10}")
         for atype in awareness_types:
             type_bc_results = [r for r in results_with_bc if r['steered_type'] == atype]
             if type_bc_results:
                 type_bc_stats = compute_bc_clustered_stats(type_bc_results)
                 if type_bc_stats:
-                    print(f"  {atype}: N={type_bc_stats['n_prompts']} prompts ({len(type_bc_results)} seeds)")
-                    print(f"    Original: {type_bc_stats['orig_rate']:.1f}% (95%CI: {type_bc_stats['orig_ci_lower']:.1f}%-{type_bc_stats['orig_ci_upper']:.1f}%)")
-                    print(f"    Steered:  {type_bc_stats['steered_rate']:.1f}% (95%CI: {type_bc_stats['steered_ci_lower']:.1f}%-{type_bc_stats['steered_ci_upper']:.1f}%)")
-                    print(f"    Change:   {type_bc_stats['steered_rate']-type_bc_stats['orig_rate']:+.1f}%")
+                    print(f"{atype:<25} {f'{type_bc_stats['n_prompts']}p/{len(type_bc_results)}s':>12} "
+                          f"{type_bc_stats['orig_rate']:>9.1f}% {type_bc_stats['steered_rate']:>9.1f}% "
+                          f"{type_bc_stats['steered_rate']-type_bc_stats['orig_rate']:>9.1f}%")
 
         # Awareness type transitions and BC impact (clustering-adjusted)
-        print(f"\nAwareness Type Transitions → BC Impact (clustering-adjusted):")
+        print(f"\n{'Transition':<30} {'N':>12} {'Orig BC':>10} {'Steer BC':>10} {'Change':>10}")
+        print(f"{'-'*30} {'-'*12} {'-'*10} {'-'*10} {'-'*10}")
 
         # Build transition groups
         transition_results = defaultdict(list)
@@ -455,10 +462,9 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
             if len(trans_group) >= 10:  # Only show transitions with 10+ examples for reliable CIs
                 trans_bc_stats = compute_bc_clustered_stats(trans_group)
                 if trans_bc_stats and trans_bc_stats['n_prompts'] >= 3:  # Need 3+ prompts for meaningful CI
-                    print(f"  {trans_key}: N={trans_bc_stats['n_prompts']} prompts ({len(trans_group)} seeds)")
-                    print(f"    BC: {trans_bc_stats['orig_rate']:.1f}% (95%CI: {trans_bc_stats['orig_ci_lower']:.1f}%-{trans_bc_stats['orig_ci_upper']:.1f}%) → "
-                          f"{trans_bc_stats['steered_rate']:.1f}% ({trans_bc_stats['steered_ci_lower']:.1f}%-{trans_bc_stats['steered_ci_upper']:.1f}%) "
-                          f"(Δ{trans_bc_stats['steered_rate']-trans_bc_stats['orig_rate']:+.1f}%)")
+                    print(f"{trans_key:<30} {f'{trans_bc_stats['n_prompts']}p/{len(trans_group)}s':>12} "
+                          f"{trans_bc_stats['orig_rate']:>9.1f}% {trans_bc_stats['steered_rate']:>9.1f}% "
+                          f"{trans_bc_stats['steered_rate']-trans_bc_stats['orig_rate']:>9.1f}%")
 
     else:
         print("No behavioral change data available")
@@ -513,9 +519,16 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
 
         # Sort buckets by their percentile range
         bucket_order = ['10-25%', '25-50%', '50-75%', '75-100%']
+
+        # Print table header
+        print(f"\n{'Bucket':<12} {'Type':<18} {'N':>10} {'Deploy':>8} {'Orig':>8} {'Steer':>8} {'Δ Aware':>10} {'Orig BC':>10} {'Steer BC':>10} {'Δ BC':>12} {'Δ BC 95% CI':>22}")
+        print(f"{'-'*12} {'-'*18} {'-'*10} {'-'*8} {'-'*8} {'-'*8} {'-'*10} {'-'*10} {'-'*10} {'-'*12} {'-'*22}")
+
         for bucket_name in bucket_order:
             if bucket_name in bucket_groups:
                 group = bucket_groups[bucket_name]
+
+                # First print overall bucket statistics
                 group_with_orig = [r for r in group if r['original_intensity'] is not None]
                 group_with_deploy = [r for r in group_with_orig if r['deployment_intensity'] is not None]
 
@@ -530,29 +543,54 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
                     steered_stats = compute_clustered_stats(group_with_deploy, 'steered_intensity')
 
                     if deploy_stats and orig_stats and steered_stats:
-                        # Main line with means
-                        print(f"{bucket_name}: awareness: {deploy_stats['mean']:.2f}→{orig_stats['mean']:.2f}→{steered_stats['mean']:.2f}", end='')
+                        n_str = f"{orig_stats['n_prompts']}p/{orig_stats['n_seeds']}s"
+                        delta_aware = steered_stats['mean'] - orig_stats['mean']
 
-                        # Add BC if available
                         if bc_stats:
-                            print(f", BC: {bc_stats['orig_rate']:.0f}%→{bc_stats['steered_rate']:.0f}% (Δ{bc_stats['steered_rate']-bc_stats['orig_rate']:+.0f}%)")
+                            delta_bc_ci = f"[{bc_stats['delta_ci_lower']:.1f}, {bc_stats['delta_ci_upper']:.1f}]"
+                            print(f"{bucket_name:<12} {'ALL':<18} {n_str:>10} {deploy_stats['mean']:>8.2f} {orig_stats['mean']:>8.2f} {steered_stats['mean']:>8.2f} "
+                                  f"{delta_aware:>10.2f} {bc_stats['orig_rate']:>9.1f}% {bc_stats['steered_rate']:>9.1f}% {bc_stats['delta_mean']:>11.1f}% {delta_bc_ci:>22}")
                         else:
-                            print()
+                            print(f"{bucket_name:<12} {'ALL':<18} {n_str:>10} {deploy_stats['mean']:>8.2f} {orig_stats['mean']:>8.2f} {steered_stats['mean']:>8.2f} "
+                                  f"{delta_aware:>10.2f} {'-':>10} {'-':>10} {'-':>12} {'-':>22}")
 
-                        # Statistical details on second line
-                        print(f"  └─ N={orig_stats['n_prompts']} prompts ({orig_stats['n_seeds']} seeds), "
-                              f"ICC={orig_stats['icc']:.2f}, 95%CI steered: [{steered_stats['ci_lower']:.2f}-{steered_stats['ci_upper']:.2f}]")
+                        # Now print breakdown by test reference type
+                        for test_type in ['self_test', 'other_test', 'no_test_reference']:
+                            type_group = [r for r in group_with_deploy if r['original_type'] == test_type]
+                            if type_group:
+                                type_deploy_stats = compute_clustered_stats(type_group, 'deployment_intensity')
+                                type_orig_stats = compute_clustered_stats(type_group, 'original_intensity')
+                                type_steered_stats = compute_clustered_stats(type_group, 'steered_intensity')
+
+                                type_bc_group = [r for r in type_group if r['original_bc'] is not None and r['steered_bc'] is not None]
+                                type_bc_stats = compute_bc_clustered_stats(type_bc_group) if type_bc_group else None
+
+                                if type_deploy_stats and type_orig_stats and type_steered_stats:
+                                    type_n_str = f"{type_orig_stats['n_prompts']}p/{type_orig_stats['n_seeds']}s"
+                                    type_delta_aware = type_steered_stats['mean'] - type_orig_stats['mean']
+
+                                    if type_bc_stats:
+                                        type_delta_bc_ci = f"[{type_bc_stats['delta_ci_lower']:.1f}, {type_bc_stats['delta_ci_upper']:.1f}]"
+                                        print(f"{'':12} {f'  {test_type}':<18} {type_n_str:>10} {type_deploy_stats['mean']:>8.2f} {type_orig_stats['mean']:>8.2f} {type_steered_stats['mean']:>8.2f} "
+                                              f"{type_delta_aware:>10.2f} {type_bc_stats['orig_rate']:>9.1f}% {type_bc_stats['steered_rate']:>9.1f}% {type_bc_stats['delta_mean']:>11.1f}% {type_delta_bc_ci:>22}")
+                                    else:
+                                        print(f"{'':12} {f'  {test_type}':<18} {type_n_str:>10} {type_deploy_stats['mean']:>8.2f} {type_orig_stats['mean']:>8.2f} {type_steered_stats['mean']:>8.2f} "
+                                              f"{type_delta_aware:>10.2f} {'-':>10} {'-':>10} {'-':>12} {'-':>22}")
 
                 elif group_with_orig:
                     orig_stats = compute_clustered_stats(group_with_orig, 'original_intensity')
                     steered_stats = compute_clustered_stats(group, 'steered_intensity')
 
                     if orig_stats and steered_stats:
-                        print(f"{bucket_name}: {len(group)} files, awareness: {orig_stats['mean']:.2f}→{steered_stats['mean']:.2f}")
-                        print(f"  └─ N={orig_stats['n_prompts']} prompts, ICC={orig_stats['icc']:.2f}")
+                        n_str = f"{orig_stats['n_prompts']}p/{orig_stats['n_seeds']}s"
+                        delta_aware = steered_stats['mean'] - orig_stats['mean']
+                        print(f"{bucket_name:<12} {'ALL':<18} {n_str:>10} {'-':>8} {orig_stats['mean']:>8.2f} {steered_stats['mean']:>8.2f} "
+                              f"{delta_aware:>10.2f} {'-':>10} {'-':>10} {'-':>8}")
                 else:
                     avg_steered = sum(r['steered_intensity'] for r in group) / len(group)
-                    print(f"{bucket_name}: {len(group)} files, steered={avg_steered:.2f}")
+                    n_str = f"?p/{len(group)}s"
+                    print(f"{bucket_name:<12} {'ALL':<18} {n_str:>10} {'-':>8} {'-':>8} {avg_steered:>8.2f} "
+                          f"{'-':>10} {'-':>10} {'-':>10} {'-':>8}")
 
     print()
     print(f"{'='*80}")

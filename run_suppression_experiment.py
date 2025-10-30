@@ -816,6 +816,7 @@ async def process_rollout(
     strategy: str,
     max_iterations: int,
     max_resample_attempts: int,
+    n_samples: int,
     temperature: float,
     semaphore: asyncio.Semaphore,
     judge_client: AsyncOpenAI,
@@ -980,12 +981,14 @@ async def main():
     parser.add_argument('--final-judge-model', default='qwen/qwen3-32b',
                        help='Judge model for final scoring (score_response calls, must be qwen/qwen3-32b)')
     parser.add_argument('--strategy', default='chunk_resample',
-                       choices=['chunk_resample', 'seed', 'hybrid', 'remove_only', 'remove_only_till_first', 'system_prompt_deployment', 'system_prompt_deployment_no_speculation', 'system_prompt_taboo_words', 'no_reasoning'],
-                       help='Suppression strategy: chunk_resample (iterative resample), remove_only (remove ALL aware sentences, keep all clean), remove_only_till_first (keep reasoning till first aware sentence), system_prompt_deployment (add deployment instruction to system prompt), system_prompt_deployment_no_speculation (add deployment instruction with no speculation constraint), system_prompt_taboo_words (prohibit any reasoning about evaluation/monitoring), no_reasoning (force close thinking tag immediately, generate only content)')
+                       choices=['chunk_resample', 'seed', 'hybrid', 'remove_only', 'remove_only_till_first', 'system_prompt_deployment', 'system_prompt_deployment_no_speculation', 'system_prompt_taboo_words', 'no_reasoning', 'resample_best_of_n'],
+                       help='Suppression strategy: chunk_resample (iterative resample), resample_best_of_n (resample aware sentences N times and pick lowest score), remove_only (remove ALL aware sentences, keep all clean), remove_only_till_first (keep reasoning till first aware sentence), system_prompt_deployment (add deployment instruction to system prompt), system_prompt_deployment_no_speculation (add deployment instruction with no speculation constraint), system_prompt_taboo_words (prohibit any reasoning about evaluation/monitoring), no_reasoning (force close thinking tag immediately, generate only content)')
     parser.add_argument('--max-iterations', type=int, default=15,
                        help='Max suppression iterations (default: 15)')
     parser.add_argument('--max-resample-attempts', type=int, default=5,
                        help='Max resample attempts per chunk (default: 5)')
+    parser.add_argument('--n-samples', type=int, default=5,
+                       help='Number of samples for resample_best_of_n strategy (default: 5)')
     parser.add_argument('--temperature', type=float, default=config.SUPPRESSION_TEMPERATURE,
                        help='Temperature for generation (default: 1.0)')
     parser.add_argument('--concurrency', type=int, default=5,
@@ -1367,6 +1370,7 @@ async def main():
             strategy=args.strategy,
             max_iterations=args.max_iterations,
             max_resample_attempts=args.max_resample_attempts,
+            n_samples=args.n_samples,
             temperature=args.temperature,
             semaphore=semaphore,
             judge_client=judge_client,
