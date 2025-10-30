@@ -23,9 +23,17 @@ while [[ $# -gt 0 ]]; do
             ONLY_EXPERIMENTS+=("$2")
             shift 2
             ;;
+        --mode)
+            MODE="$2"
+            if [[ "$MODE" != "binary" && "$MODE" != "ternary" ]]; then
+                echo "Error: --mode must be 'binary' or 'ternary'"
+                exit 1
+            fi
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--skip EXPERIMENT_NAME] [--only EXPERIMENT_NAME]"
+            echo "Usage: $0 [--skip EXPERIMENT_NAME] [--only EXPERIMENT_NAME] [--mode binary|ternary]"
             exit 1
             ;;
     esac
