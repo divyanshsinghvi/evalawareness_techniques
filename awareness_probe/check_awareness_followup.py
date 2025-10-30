@@ -293,23 +293,26 @@ async def check_awareness_file(
             elif file_type == 'steered':
                 # Steered file processing
                 system_prompt = data.get('system_prompt', '')
-                result['original_source_file'] = data.get('original_source_file', '')
+                result['original_source_file'] = data.get('source_file', '')
+                result['bucket'] = data.get('bucket', '')
+                result['seed'] = data.get('seed', '')
 
                 # Check steered response
-                if 'steered_response' in data:
-                    steered_user_msg = data['steered_response'].get('user_message', '')
-                    steered_response_text = data['steered_response'].get('response', '')
+                # Use model_only_response (contains actual response with <think> tags)
+                # instead of full_response (has padding tokens)
+                steered_user_msg = data.get('prompt', '')
+                steered_response_text = data.get('model_only_response', data.get('full_response', ''))
 
-                    if steered_user_msg and steered_response_text:
-                        messages = [
-                            {'role': 'system', 'content': system_prompt},
-                            {'role': 'user', 'content': steered_user_msg}
-                        ]
+                if steered_user_msg and steered_response_text:
+                    messages = [
+                        {'role': 'system', 'content': system_prompt},
+                        {'role': 'user', 'content': steered_user_msg}
+                    ]
 
-                        steered_followup = await ask_followup_question(
-                            client, messages, steered_response_text, model, mode, question_type
-                        )
-                        result['steered_followup'] = steered_followup
+                    steered_followup = await ask_followup_question(
+                        client, messages, steered_response_text, model, mode, question_type
+                    )
+                    result['steered_followup'] = steered_followup
 
         # Save to output file
         output_file.parent.mkdir(parents=True, exist_ok=True)
