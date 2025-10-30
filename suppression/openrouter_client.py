@@ -184,8 +184,9 @@ class OpenRouterClient:
 
         # Extract reasoning and content directly from OpenRouter response
         # OpenRouter returns these in separate fields, no need to parse tags
-        reasoning = message.get("reasoning", "")
-        content = message.get("content", "")
+        # IMPORTANT: reasoning can be None when model doesn't generate reasoning
+        reasoning = message.get("reasoning") or ""  # Convert None to ""
+        content = message.get("content") or ""      # Convert None to ""
         raw_response = f"<{self.thinking_tag}>{reasoning}</{self.thinking_tag}>{content}" if reasoning else content
 
         # Extract finish_reason from API response
@@ -250,13 +251,25 @@ class OpenRouterClient:
             prefill_content: Content to prefill in assistant message
             prefill_reasoning: Reasoning to prefill in thinking tags
             force_close_thinking: If True, close thinking tag even if prefill_content is empty
+                                  This forces the model to skip reasoning and generate content directly
 
         Returns:
             Messages with assistant prefill added if needed
         """
         messages = base_messages.copy()
 
-        if prefill_reasoning or prefill_content:
+        # Handle force_close_thinking even when both reasoning and content are empty
+        if force_close_thinking and not prefill_reasoning and not prefill_content:
+            # Force close thinking tag with minimal content to prevent model from opening NEW thinking
+            # CRITICAL: For complex prompts, model ignores <think></think> and opens NEW thinking
+            # Adding minimal text "Okay\n" inside thinking prevents this behavior
+            # The model sees thinking already started and closed, so it continues with content
+            assistant_content = f"<{self.thinking_tag}>Okay\n</{self.thinking_tag}>\n"
+            messages.append({
+                "role": "assistant",
+                "content": assistant_content
+            })
+        elif prefill_reasoning or prefill_content:
             assistant_content = ""
 
             if prefill_reasoning:

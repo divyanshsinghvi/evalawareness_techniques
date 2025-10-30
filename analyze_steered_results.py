@@ -31,18 +31,58 @@ def extract_prompt_id(filename: str) -> str:
     return prompt_id
 
 
-def compute_clustered_stats(results: List[Dict], value_field: str) -> Dict:
+def compute_clustered_stats(results: List[Dict], value_field: str, use_clustering: bool = False) -> Dict:
     """
-    Compute clustered statistics accounting for prompt-level correlation.
+    Compute statistics with optional clustering correction.
 
     Args:
         results: List of result dictionaries
         value_field: Field name to analyze (e.g., 'steered_intensity')
+        use_clustering: If True, account for prompt-level correlation (ICC > 0).
+                       If False, treat seeds as independent (ICC = 0, like suppression).
 
     Returns:
         Dict with: mean, ci_lower, ci_upper, se, var_between, var_within,
                    icc, n_prompts, n_seeds, n_eff, sd_between, sd_within
     """
+    # Extract values
+    values = [r[value_field] for r in results if r[value_field] is not None]
+    if not values:
+        return None
+
+    if not use_clustering:
+        # Treat all seeds as independent (ICC = 0, like suppression experiments)
+        n_seeds = len(values)
+        mean = np.mean(values)
+        variance = np.var(values, ddof=1) if n_seeds > 1 else 0
+        se = np.sqrt(variance / n_seeds) if n_seeds > 0 else 0
+
+        # 95% CI using t-distribution
+        df = n_seeds - 1 if n_seeds > 1 else 1
+        t_crit = stats.t.ppf(0.975, df)
+        ci_lower = mean - t_crit * se
+        ci_upper = mean + t_crit * se
+
+        # Count unique prompts for reporting (but don't use for stats)
+        prompt_ids = set(extract_prompt_id(r['file']) for r in results if r[value_field] is not None)
+        n_prompts = len(prompt_ids)
+
+        return {
+            'mean': mean,
+            'ci_lower': ci_lower,
+            'ci_upper': ci_upper,
+            'se': se,
+            'var_between': 0.0,  # No between-prompt variance when treating independently
+            'var_within': variance,
+            'sd_between': 0.0,
+            'sd_within': np.sqrt(variance),
+            'icc': 0.0,  # ICC = 0 when treating seeds independently
+            'n_prompts': n_prompts,
+            'n_seeds': n_seeds,
+            'n_eff': n_seeds,  # Effective N equals actual N when ICC = 0
+        }
+
+    # Original clustering approach (for comparison or other uses)
     # Group by prompt
     prompt_groups = defaultdict(list)
     for r in results:
@@ -99,8 +139,126 @@ def compute_clustered_stats(results: List[Dict], value_field: str) -> Dict:
     }
 
 
-def compute_bc_clustered_stats(results: List[Dict]) -> Dict:
-    """Compute clustered statistics for behavioral change (binary outcome)."""
+def compute_choice_distribution_stats(results: List[Dict]) -> Dict:
+    """
+    Compute choice distribution statistics (% choosing A vs B).
+
+    Returns proportions for deployment, original evaluation, and steered evaluation.
+    """
+    deployment_choices = []
+    original_choices = []
+    steered_choices = []
+
+    for r in results:
+        if r['deployment_choice']:
+            deployment_choices.append(1 if r['deployment_choice'] == 'B' else 0)
+        if r['original_choice']:
+            original_choices.append(1 if r['original_choice'] == 'B' else 0)
+        if r['steered_choice']:
+            steered_choices.append(1 if r['steered_choice'] == 'B' else 0)
+
+    if not deployment_choices:
+        return None
+
+    # Compute proportions (1 = B, 0 = A)
+    deploy_b_rate = np.mean(deployment_choices) * 100 if deployment_choices else None
+    orig_b_rate = np.mean(original_choices) * 100 if original_choices else None
+    steered_b_rate = np.mean(steered_choices) * 100 if steered_choices else None
+
+    # Compute standard errors for proportions
+    def prop_se(values):
+        if not values or len(values) < 2:
+            return 0
+        p = np.mean(values)
+        return np.sqrt(p * (1 - p) / len(values)) * 100
+
+    deploy_se = prop_se(deployment_choices)
+    orig_se = prop_se(original_choices)
+    steered_se = prop_se(steered_choices)
+
+    # 95% CI
+    t_crit = 1.96  # For large N, use normal approximation
+
+    return {
+        'deploy_b_rate': deploy_b_rate,
+        'deploy_a_rate': 100 - deploy_b_rate if deploy_b_rate is not None else None,
+        'deploy_ci_lower': deploy_b_rate - t_crit * deploy_se if deploy_b_rate is not None else None,
+        'deploy_ci_upper': deploy_b_rate + t_crit * deploy_se if deploy_b_rate is not None else None,
+        'orig_b_rate': orig_b_rate,
+        'orig_a_rate': 100 - orig_b_rate if orig_b_rate is not None else None,
+        'orig_ci_lower': orig_b_rate - t_crit * orig_se if orig_b_rate is not None else None,
+        'orig_ci_upper': orig_b_rate + t_crit * orig_se if orig_b_rate is not None else None,
+        'steered_b_rate': steered_b_rate,
+        'steered_a_rate': 100 - steered_b_rate if steered_b_rate is not None else None,
+        'steered_ci_lower': steered_b_rate - t_crit * steered_se if steered_b_rate is not None else None,
+        'steered_ci_upper': steered_b_rate + t_crit * steered_se if steered_b_rate is not None else None,
+        'n_deploy': len(deployment_choices),
+        'n_orig': len(original_choices),
+        'n_steered': len(steered_choices),
+    }
+
+
+def compute_bc_clustered_stats(results: List[Dict], use_clustering: bool = False) -> Dict:
+    """
+    Compute statistics for behavioral change (binary outcome).
+
+    Args:
+        results: List of result dictionaries
+        use_clustering: If True, account for prompt-level correlation.
+                       If False, treat seeds as independent (like suppression).
+    """
+    # Extract BC values
+    orig_bc_values = []
+    steered_bc_values = []
+    for r in results:
+        if r['original_bc'] is not None and r['steered_bc'] is not None:
+            orig_bc_values.append(1 if r['original_bc'] else 0)
+            steered_bc_values.append(1 if r['steered_bc'] else 0)
+
+    if not orig_bc_values:
+        return None
+
+    n_seeds = len(orig_bc_values)
+
+    if not use_clustering:
+        # Treat all seeds as independent (ICC = 0)
+        orig_rate = np.mean(orig_bc_values) * 100
+        steered_rate = np.mean(steered_bc_values) * 100
+
+        # SE for proportions: sqrt(p*(1-p)/n)
+        orig_prop = np.mean(orig_bc_values)
+        steered_prop = np.mean(steered_bc_values)
+        se_orig = np.sqrt(orig_prop * (1 - orig_prop) / n_seeds) * 100 if n_seeds > 0 else 0
+        se_steered = np.sqrt(steered_prop * (1 - steered_prop) / n_seeds) * 100 if n_seeds > 0 else 0
+
+        # For paired delta (same seeds before/after), use paired differences
+        deltas = [(steered - orig) for orig, steered in zip(orig_bc_values, steered_bc_values)]
+        delta_mean = np.mean(deltas) * 100
+        se_delta = np.std(deltas, ddof=1) / np.sqrt(n_seeds) * 100 if n_seeds > 1 else 0
+
+        # 95% CI using t-distribution
+        df = n_seeds - 1 if n_seeds > 1 else 1
+        t_crit = stats.t.ppf(0.975, df)
+
+        # Count unique prompts for reporting
+        prompt_ids = set(extract_prompt_id(r['file']) for r in results
+                        if r['original_bc'] is not None and r['steered_bc'] is not None)
+        n_prompts = len(prompt_ids)
+
+        return {
+            'orig_rate': orig_rate,
+            'steered_rate': steered_rate,
+            'orig_ci_lower': orig_rate - t_crit * se_orig,
+            'orig_ci_upper': orig_rate + t_crit * se_orig,
+            'steered_ci_lower': steered_rate - t_crit * se_steered,
+            'steered_ci_upper': steered_rate + t_crit * se_steered,
+            'delta_mean': delta_mean,
+            'delta_ci_lower': delta_mean - t_crit * se_delta,
+            'delta_ci_upper': delta_mean + t_crit * se_delta,
+            'n_prompts': n_prompts,
+        }
+
+    # Original clustering approach
     # Group by prompt
     prompt_groups = defaultdict(lambda: {'orig': [], 'steered': []})
     for r in results:
@@ -331,9 +489,9 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
     print(f"{'='*80}")
     print(f"Total files analyzed: {len(results)}\n")
 
-    # Overall awareness statistics with clustering correction
+    # Overall awareness statistics (treating seeds independently)
     print(f"{'='*80}")
-    print(f"OVERALL AWARENESS (Clustering-Corrected)")
+    print(f"OVERALL AWARENESS (Seeds Treated Independently, ICC=0)")
     print(f"{'='*80}")
 
     # Check if we have original data for comparison
@@ -341,10 +499,10 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
     results_with_deploy = [r for r in results_with_orig if r['deployment_intensity'] is not None]
 
     if results_with_deploy:
-        # Compute clustered stats for each branch
-        deploy_stats = compute_clustered_stats(results_with_deploy, 'deployment_intensity')
-        orig_stats = compute_clustered_stats(results_with_deploy, 'original_intensity')
-        steered_stats = compute_clustered_stats(results_with_deploy, 'steered_intensity')
+        # Compute stats for each branch (treating seeds independently, ICC=0)
+        deploy_stats = compute_clustered_stats(results_with_deploy, 'deployment_intensity', use_clustering=False)
+        orig_stats = compute_clustered_stats(results_with_deploy, 'original_intensity', use_clustering=False)
+        steered_stats = compute_clustered_stats(results_with_deploy, 'steered_intensity', use_clustering=False)
 
         if deploy_stats and orig_stats and steered_stats:
             # Main awareness table
@@ -367,8 +525,8 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
             print(f"{'Average':<20} {avg_icc:>6.2f}")
 
     elif results_with_orig:
-        orig_stats = compute_clustered_stats(results_with_orig, 'original_intensity')
-        steered_stats = compute_clustered_stats(results, 'steered_intensity')
+        orig_stats = compute_clustered_stats(results_with_orig, 'original_intensity', use_clustering=False)
+        steered_stats = compute_clustered_stats(results, 'steered_intensity', use_clustering=False)
         if orig_stats and steered_stats:
             print(f"Original: {orig_stats['mean']:.2f} (95%CI: {orig_stats['ci_lower']:.2f}-{orig_stats['ci_upper']:.2f})")
             print(f"Steered:  {steered_stats['mean']:.2f} (95%CI: {steered_stats['ci_lower']:.2f}-{steered_stats['ci_upper']:.2f})")
@@ -402,16 +560,37 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
             print(f"  {atype}: {count} ({pct:.1f}%)")
     print()
 
-    # Behavioral change statistics with clustering correction
+    # Choice distribution statistics
     print(f"{'='*80}")
-    print(f"BEHAVIORAL CHANGE (Clustering-Corrected)")
+    print(f"CHOICE DISTRIBUTION (% Choosing A vs B)")
+    print(f"{'='*80}")
+
+    choice_stats = compute_choice_distribution_stats(results)
+    if choice_stats:
+        print(f"\nSample: {choice_stats['n_deploy']} deployment, {choice_stats['n_orig']} original eval, {choice_stats['n_steered']} steered eval")
+        print(f"\n{'Condition':<20} {'% A':>10} {'% B':>10} {'95% CI (B)':>25}")
+        print(f"{'-'*20} {'-'*10} {'-'*10} {'-'*25}")
+        if choice_stats['deploy_b_rate'] is not None:
+            print(f"{'Deployment':<20} {choice_stats['deploy_a_rate']:>9.1f}% {choice_stats['deploy_b_rate']:>9.1f}% "
+                  f"{f'[{choice_stats['deploy_ci_lower']:.1f}, {choice_stats['deploy_ci_upper']:.1f}]':>25}")
+        if choice_stats['orig_b_rate'] is not None:
+            print(f"{'Original Eval':<20} {choice_stats['orig_a_rate']:>9.1f}% {choice_stats['orig_b_rate']:>9.1f}% "
+                  f"{f'[{choice_stats['orig_ci_lower']:.1f}, {choice_stats['orig_ci_upper']:.1f}]':>25}")
+        if choice_stats['steered_b_rate'] is not None:
+            print(f"{'Steered Eval':<20} {choice_stats['steered_a_rate']:>9.1f}% {choice_stats['steered_b_rate']:>9.1f}% "
+                  f"{f'[{choice_stats['steered_ci_lower']:.1f}, {choice_stats['steered_ci_upper']:.1f}]':>25}")
+    print()
+
+    # Behavioral change statistics (treating seeds independently)
+    print(f"{'='*80}")
+    print(f"BEHAVIORAL CHANGE (Seeds Treated Independently, ICC=0)")
     print(f"{'='*80}")
 
     # Filter to only results with BC data
     results_with_bc = [r for r in results if r['original_bc'] is not None and r['steered_bc'] is not None]
 
     if results_with_bc:
-        bc_stats = compute_bc_clustered_stats(results_with_bc)
+        bc_stats = compute_bc_clustered_stats(results_with_bc, use_clustering=False)
 
         if bc_stats:
             print(f"\nSample: {bc_stats['n_prompts']} prompts, {len(results_with_bc)} seeds")
@@ -428,7 +607,7 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
         for atype in awareness_types:
             type_bc_results = [r for r in results_with_bc if r['original_type'] == atype]
             if type_bc_results:
-                type_bc_stats = compute_bc_clustered_stats(type_bc_results)
+                type_bc_stats = compute_bc_clustered_stats(type_bc_results, use_clustering=False)
                 if type_bc_stats:
                     print(f"{atype:<25} {f'{type_bc_stats['n_prompts']}p/{len(type_bc_results)}s':>12} "
                           f"{type_bc_stats['orig_rate']:>9.1f}% {type_bc_stats['steered_rate']:>9.1f}% "
@@ -440,7 +619,7 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
         for atype in awareness_types:
             type_bc_results = [r for r in results_with_bc if r['steered_type'] == atype]
             if type_bc_results:
-                type_bc_stats = compute_bc_clustered_stats(type_bc_results)
+                type_bc_stats = compute_bc_clustered_stats(type_bc_results, use_clustering=False)
                 if type_bc_stats:
                     print(f"{atype:<25} {f'{type_bc_stats['n_prompts']}p/{len(type_bc_results)}s':>12} "
                           f"{type_bc_stats['orig_rate']:>9.1f}% {type_bc_stats['steered_rate']:>9.1f}% "
@@ -456,12 +635,12 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
             key = f"{r['original_type']}→{r['steered_type']}"
             transition_results[key].append(r)
 
-        # Sort by count descending, compute clustered stats
+        # Sort by count descending, compute stats
         for trans_key in sorted(transition_results.keys(), key=lambda x: len(transition_results[x]), reverse=True):
             trans_group = transition_results[trans_key]
             if len(trans_group) >= 10:  # Only show transitions with 10+ examples for reliable CIs
-                trans_bc_stats = compute_bc_clustered_stats(trans_group)
-                if trans_bc_stats and trans_bc_stats['n_prompts'] >= 3:  # Need 3+ prompts for meaningful CI
+                trans_bc_stats = compute_bc_clustered_stats(trans_group, use_clustering=False)
+                if trans_bc_stats and trans_bc_stats['n_prompts'] >= 3:  # Need 3+ unique prompts for reporting
                     print(f"{trans_key:<30} {f'{trans_bc_stats['n_prompts']}p/{len(trans_group)}s':>12} "
                           f"{trans_bc_stats['orig_rate']:>9.1f}% {trans_bc_stats['steered_rate']:>9.1f}% "
                           f"{trans_bc_stats['steered_rate']-trans_bc_stats['orig_rate']:>9.1f}%")
@@ -532,15 +711,15 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
                 group_with_orig = [r for r in group if r['original_intensity'] is not None]
                 group_with_deploy = [r for r in group_with_orig if r['deployment_intensity'] is not None]
 
-                # Calculate BC stats with clustering
+                # Calculate BC stats (treating seeds independently)
                 group_with_bc = [r for r in group if r['original_bc'] is not None and r['steered_bc'] is not None]
-                bc_stats = compute_bc_clustered_stats(group_with_bc) if group_with_bc else None
+                bc_stats = compute_bc_clustered_stats(group_with_bc, use_clustering=False) if group_with_bc else None
 
                 if group_with_deploy:
-                    # Compute clustered stats for awareness
-                    deploy_stats = compute_clustered_stats(group_with_deploy, 'deployment_intensity')
-                    orig_stats = compute_clustered_stats(group_with_deploy, 'original_intensity')
-                    steered_stats = compute_clustered_stats(group_with_deploy, 'steered_intensity')
+                    # Compute stats for awareness (treating seeds independently)
+                    deploy_stats = compute_clustered_stats(group_with_deploy, 'deployment_intensity', use_clustering=False)
+                    orig_stats = compute_clustered_stats(group_with_deploy, 'original_intensity', use_clustering=False)
+                    steered_stats = compute_clustered_stats(group_with_deploy, 'steered_intensity', use_clustering=False)
 
                     if deploy_stats and orig_stats and steered_stats:
                         n_str = f"{orig_stats['n_prompts']}p/{orig_stats['n_seeds']}s"
@@ -558,12 +737,12 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
                         for test_type in ['self_test', 'other_test', 'no_test_reference']:
                             type_group = [r for r in group_with_deploy if r['original_type'] == test_type]
                             if type_group:
-                                type_deploy_stats = compute_clustered_stats(type_group, 'deployment_intensity')
-                                type_orig_stats = compute_clustered_stats(type_group, 'original_intensity')
-                                type_steered_stats = compute_clustered_stats(type_group, 'steered_intensity')
+                                type_deploy_stats = compute_clustered_stats(type_group, 'deployment_intensity', use_clustering=False)
+                                type_orig_stats = compute_clustered_stats(type_group, 'original_intensity', use_clustering=False)
+                                type_steered_stats = compute_clustered_stats(type_group, 'steered_intensity', use_clustering=False)
 
                                 type_bc_group = [r for r in type_group if r['original_bc'] is not None and r['steered_bc'] is not None]
-                                type_bc_stats = compute_bc_clustered_stats(type_bc_group) if type_bc_group else None
+                                type_bc_stats = compute_bc_clustered_stats(type_bc_group, use_clustering=False) if type_bc_group else None
 
                                 if type_deploy_stats and type_orig_stats and type_steered_stats:
                                     type_n_str = f"{type_orig_stats['n_prompts']}p/{type_orig_stats['n_seeds']}s"
@@ -578,8 +757,8 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
                                               f"{type_delta_aware:>10.2f} {'-':>10} {'-':>10} {'-':>12} {'-':>22}")
 
                 elif group_with_orig:
-                    orig_stats = compute_clustered_stats(group_with_orig, 'original_intensity')
-                    steered_stats = compute_clustered_stats(group, 'steered_intensity')
+                    orig_stats = compute_clustered_stats(group_with_orig, 'original_intensity', use_clustering=False)
+                    steered_stats = compute_clustered_stats(group, 'steered_intensity', use_clustering=False)
 
                     if orig_stats and steered_stats:
                         n_str = f"{orig_stats['n_prompts']}p/{orig_stats['n_seeds']}s"

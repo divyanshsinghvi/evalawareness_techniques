@@ -116,6 +116,7 @@ ROLLOUTS_DIR = WORKING_DIR / "rollouts"
 RESPONSE_CATEGORIZATION_DIR = WORKING_DIR / "response_categorization"
 SENTENCE_CATEGORIZATION_DIR = WORKING_DIR / "categorization"
 SUPPRESSION_EXPERIMENTS_DIR = WORKING_DIR / "suppression_experiments"
+AWARENESS_YES_NO_DIR = WORKING_DIR / "awareness_yes_no"
 
 # Analysis output directories
 OUTPUTS_DIR = Path("./outputs")
@@ -229,6 +230,7 @@ def ensure_dirs():
         RESPONSE_CATEGORIZATION_DIR,
         SENTENCE_CATEGORIZATION_DIR,
         SUPPRESSION_EXPERIMENTS_DIR,
+        AWARENESS_YES_NO_DIR,
         OUTPUTS_DIR,
         LOGS_DIR,
     ]

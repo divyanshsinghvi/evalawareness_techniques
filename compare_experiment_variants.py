@@ -192,6 +192,10 @@ def process_single_experiment(
             return (True, df, exp_name)
 
     except Exception as e:
+        print(f"\n❌ ERROR processing {technique} experiment '{exp_name}':")
+        print(f"   Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return (False, None, exp_name)
 
 
@@ -434,6 +438,35 @@ def compute_experiment_metrics(combined_df: pd.DataFrame) -> pd.DataFrame:
         else:
             orig_bc_per_prompt_mean = orig_bc_per_prompt_std = 0
 
+        # Choice distribution stats (% choosing A vs B)
+        deploy_b_rate = deploy_a_rate = deploy_b_ci_lower = deploy_b_ci_upper = None
+        orig_b_rate = orig_a_rate = orig_b_ci_lower = orig_b_ci_upper = None
+        mod_b_rate = mod_a_rate = mod_b_ci_lower = mod_b_ci_upper = None
+
+        if 'deployment_choice' in group.columns:
+            deploy_b = (group['deployment_choice'] == 'B').astype(int)
+            deploy_b_rate = deploy_b.mean() * 100
+            deploy_a_rate = 100 - deploy_b_rate
+            deploy_b_se = np.sqrt(deploy_b.mean() * (1 - deploy_b.mean()) / len(deploy_b)) * 100 if len(deploy_b) > 0 else 0
+            deploy_b_ci_lower = deploy_b_rate - 1.96 * deploy_b_se
+            deploy_b_ci_upper = deploy_b_rate + 1.96 * deploy_b_se
+
+        if 'original_choice' in group.columns:
+            orig_b = (group['original_choice'] == 'B').astype(int)
+            orig_b_rate = orig_b.mean() * 100
+            orig_a_rate = 100 - orig_b_rate
+            orig_b_se = np.sqrt(orig_b.mean() * (1 - orig_b.mean()) / len(orig_b)) * 100 if len(orig_b) > 0 else 0
+            orig_b_ci_lower = orig_b_rate - 1.96 * orig_b_se
+            orig_b_ci_upper = orig_b_rate + 1.96 * orig_b_se
+
+        if 'modified_choice' in group.columns:
+            mod_b = (group['modified_choice'] == 'B').astype(int)
+            mod_b_rate = mod_b.mean() * 100
+            mod_a_rate = 100 - mod_b_rate
+            mod_b_se = np.sqrt(mod_b.mean() * (1 - mod_b.mean()) / len(mod_b)) * 100 if len(mod_b) > 0 else 0
+            mod_b_ci_lower = mod_b_rate - 1.96 * mod_b_se
+            mod_b_ci_upper = mod_b_rate + 1.96 * mod_b_se
+
         # Task completion
         task_completion = (group['modified_choice'].notna().sum() / len(group)) * 100
 
@@ -637,6 +670,19 @@ def compute_experiment_metrics(combined_df: pd.DataFrame) -> pd.DataFrame:
             'original_choice_consistency': original_choice_consistency,
             'awareness_shift': awareness_shift,
             'choice_proportion_shift': choice_proportion_shift,
+            # Choice distribution (% choosing A vs B)
+            'deploy_b_rate': deploy_b_rate,
+            'deploy_a_rate': deploy_a_rate,
+            'deploy_b_ci_lower': deploy_b_ci_lower,
+            'deploy_b_ci_upper': deploy_b_ci_upper,
+            'orig_b_rate': orig_b_rate,
+            'orig_a_rate': orig_a_rate,
+            'orig_b_ci_lower': orig_b_ci_lower,
+            'orig_b_ci_upper': orig_b_ci_upper,
+            'mod_b_rate': mod_b_rate,
+            'mod_a_rate': mod_a_rate,
+            'mod_b_ci_lower': mod_b_ci_lower,
+            'mod_b_ci_upper': mod_b_ci_upper,
         }
 
         metrics_list.append(metrics)
