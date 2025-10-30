@@ -499,8 +499,11 @@ Examples:
     if args.max_seed is not None:
         filtered_files = []
         for f in files:
-            # Extract seed number
-            match = re.match(r'.+_seed_(\d+)\.yaml$', f.name)
+            # Extract seed number (works for both rollout and suppression files)
+            # Rollout: *_seed_10.yaml
+            # Suppression: *_seed_10_supp_0.yaml
+            # Steering: *_seed_10_steer_out.yaml
+            match = re.search(r'_seed_(\d+)', f.name)
             if match:
                 seed = int(match.group(1))
                 if seed <= args.max_seed:
