@@ -527,6 +527,7 @@ Examples:
     print(f"Output: {output_base}")
     print(f"File type: {args.file_type}")
     print(f"Model: {args.model}")
+    print(f"Providers: ncompass/fp8, deepinfra/fp8, novita/fp8, nebius/base")
     print(f"Question type: {args.question_type}")
     print(f"Mode: {args.mode} ({'yes/no' if args.mode == 'binary' else 'yes/no/unsure'})")
     print(f"Concurrency: {args.concurrency}")
@@ -575,11 +576,11 @@ Examples:
     print()
 
     # Initialize client with temperature=0 for deterministic followup answers
-    # Use ncompass/fp8 and deepinfra/fp8 providers for cost efficiency
+    # Use fp8 and base providers for cost efficiency
     client = OpenRouterClient(
         model=args.model,
         temperature=0.0,
-        provider=["ncompass/fp8", "deepinfra/fp8"]
+        provider=["ncompass/fp8", "deepinfra/fp8", "novita/fp8", "nebius/base"]
     )
 
     # Process files
@@ -615,15 +616,15 @@ Examples:
     print(f"Complete: {success}/{len(results)} files")
     print(f"{'='*80}")
 
-    # Verification output
-    if args.verbose or args.verify_sample > 0:
-        # Load all results for verification
-        all_results = []
-        for _, output_file in file_pairs:
-            if output_file.exists():
-                with open(output_file) as f:
-                    all_results.append(yaml.safe_load(f))
+    # Load all results for statistics and verification
+    all_results = []
+    for _, output_file in file_pairs:
+        if output_file.exists():
+            with open(output_file) as f:
+                all_results.append(yaml.safe_load(f))
 
+    # Verification output (verbose mode)
+    if args.verbose or args.verify_sample > 0:
         if args.verbose and all_results:
             print(f"\n{'='*80}")
             print(f"DETAILED VERIFICATION OUTPUT (First 10)")
@@ -658,7 +659,8 @@ Examples:
                         print(f"    {followup['raw_response']}")
                         print()
 
-        # Print summary statistics
+    # Print summary statistics (always show, not just in verbose mode)
+    if all_results:
         print(f"\n{'='*80}")
         print(f"SUMMARY STATISTICS")
         print(f"{'='*80}")
@@ -673,7 +675,7 @@ Examples:
                         count = deploy_answers.count(ans)
                         pct = (count / len(deploy_answers) * 100)
                         print(f"  {ans}: {count} ({pct:.1f}%)")
-
+    
             if check_evaluation:
                 eval_answers = [r['evaluation_followup']['answer']
                               for r in all_results if 'evaluation_followup' in r]
@@ -683,7 +685,7 @@ Examples:
                         count = eval_answers.count(ans)
                         pct = (count / len(eval_answers) * 100)
                         print(f"  {ans}: {count} ({pct:.1f}%)")
-
+    
         elif args.file_type == 'suppression':
             supp_answers = [r['suppressed_followup']['answer']
                           for r in all_results if 'suppressed_followup' in r]
@@ -693,10 +695,10 @@ Examples:
                     count = supp_answers.count(ans)
                     pct = (count / len(supp_answers) * 100)
                     print(f"  {ans}: {count} ({pct:.1f}%)")
-
+    
             # Note: We no longer check original responses here since they're already
             # available in the original rollout files
-
+    
         elif args.file_type == 'steered':
             steered_answers = [r['steered_followup']['answer']
                              for r in all_results if 'steered_followup' in r]
@@ -705,7 +707,7 @@ Examples:
                 for ans in ['yes', 'no', 'unsure']:
                     count = steered_answers.count(ans)
                     pct = (count / len(steered_answers) * 100)
-                    print(f"  {ans}: {count} ({pct:.1f}%)")
+                print(f"  {ans}: {count} ({pct:.1f}%)")
 
     return 0
 
