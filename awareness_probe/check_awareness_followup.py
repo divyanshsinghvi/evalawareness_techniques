@@ -570,7 +570,13 @@ Examples:
         for input_file, output_file in file_pairs
     ]
 
-    results = await tqdm.gather(*tasks, desc="Processing")
+    # Use as_completed for real-time progress updates
+    results = []
+    with tqdm(total=len(tasks), desc="Processing") as pbar:
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            results.append(result)
+            pbar.update(1)
 
     # Summary
     success = sum(1 for r in results if r)
