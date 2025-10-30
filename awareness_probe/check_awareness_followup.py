@@ -575,7 +575,12 @@ Examples:
     print()
 
     # Initialize client with temperature=0 for deterministic followup answers
-    client = OpenRouterClient(model=args.model, temperature=0.0)
+    # Use ncompass/fp8 and deepinfra/fp8 providers for cost efficiency
+    client = OpenRouterClient(
+        model=args.model,
+        temperature=0.0,
+        provider=["ncompass/fp8", "deepinfra/fp8"]
+    )
 
     # Process files
     use_checksum = not args.force
