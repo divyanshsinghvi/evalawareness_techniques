@@ -710,7 +710,7 @@ Examples:
                 for ans in ['yes', 'no', 'unsure']:
                     count = steered_answers.count(ans)
                     pct = (count / len(steered_answers) * 100)
-                print(f"  {ans}: {count} ({pct:.1f}%)")
+                    print(f"  {ans}: {count} ({pct:.1f}%)")
 
     return 0
 

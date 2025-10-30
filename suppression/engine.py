@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import analyze_awareness_levels
 from suppression.openrouter_client import OpenRouterClient
-from score_awareness_with_llm import score_sentence, AsyncOpenAI
+from score_awareness_with_llm import score_sentence, score_sentence_v2, AsyncOpenAI
 
 # Get module logger
 logger = logging.getLogger(__name__)
@@ -393,55 +393,130 @@ async def generate_with_suppression(
             return (is_aware, awareness_count, aware_sentences, detection_details)
 
         elif detection_mode == "llm_sentence":
-            # Use LLM scoring - always split into sentences for precise detection
-            # Parse chunk into sentences
+            # Parse detection_threshold to determine operation and field
+            # Formats:
+            #   "exclude:criteria:2" → exclude when criteria == 2
+            #   "greater_equal:score:5" → exclude when score >= 5
+            #   "less_than:score:3" → exclude when score < 3
+            #   "5" (legacy) → exclude when score >= 5
+
+            threshold_parts = detection_threshold.split(':')
+            if len(threshold_parts) == 3:
+                # New format: operation:field:value
+                operation, field, value_str = threshold_parts
+                threshold_value = int(value_str)
+            else:
+                # Legacy format: just a number (for backward compatibility)
+                operation = "greater_equal"
+                field = "score"
+                threshold_value = int(detection_threshold)
+
+            # Parse chunk into sentences for precise detection
             chunk_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', chunk)
             chunk_sentences = [s.strip() for s in chunk_sentences if s.strip()]
 
-            # Score each sentence individually - stop at first aware sentence
+            # Score each sentence individually - stop at first that matches filter
             aware_sentences = []
             highest_score = 0
+            highest_criteria = 0
             dominant_category = 'Unknown'
             dominant_flag = 'no_test_reference'
+            dominant_label = 'neither'
             sentences_checked = 0
-            threshold_int = int(detection_threshold)
 
             for sent in chunk_sentences:
                 sentences_checked += 1
-                result = await score_sentence(llm_judge_client, sent, detection_judge_model, detection_judge_mode)
-                score = result.get('score', 0)
-                category = result.get('category', 'Unknown')
-                test_reference_flag = result.get('test_reference_flag', 'no_test_reference')
+
+                # Use appropriate scoring function based on mode
+                if detection_judge_mode == "v2":
+                    # V2 MODE: 3-category classifier
+                    result = await score_sentence_v2(
+                        llm_judge_client,
+                        sent,
+                        user_message,  # Pass user_message for context
+                        detection_judge_model
+                    )
+                    # Criteria must be present and valid (no default)
+                    criteria = result.get('criteria')
+                    if criteria is None:
+                        raise ValueError(f"Missing 'criteria' in V2 detection result for sentence: {sent[:100]}")
+                    label = result.get('label', 'neither')
+                    score = criteria  # Use criteria as score for v2
+
+                    # Track highest criteria value
+                    if criteria > highest_criteria:
+                        highest_criteria = criteria
+                        dominant_label = label
+                else:
+                    # V0/V1 MODE: Awareness intensity scoring
+                    result = await score_sentence(llm_judge_client, sent, detection_judge_model, detection_judge_mode)
+                    score = result.get('score', 0)
+                    category = result.get('category', 'Unknown')
+                    test_reference_flag = result.get('test_reference_flag', 'no_test_reference')
+
+                    # Track highest score and its metadata
+                    if score > highest_score:
+                        highest_score = score
+                        dominant_category = category
+                        dominant_flag = test_reference_flag
 
                 # Track detection judge API time
                 if 'api_time' in result:
                     detection_judge_api_time += result['api_time']
                     detection_judge_api_calls += 1
 
-                # Track highest score and its metadata
-                if score > highest_score:
-                    highest_score = score
-                    dominant_category = category
-                    dominant_flag = test_reference_flag
+                # Check if this sentence matches the filter based on operation
+                matches_filter = False
+                if operation == "exclude" and field in ["criteria", "score"]:
+                    # Exact match
+                    value_to_check = criteria if field == "criteria" and detection_judge_mode == "v2" else score
+                    matches_filter = (value_to_check == threshold_value)
+                elif operation == "greater_equal":
+                    matches_filter = (score >= threshold_value)
+                elif operation == "less_than":
+                    matches_filter = (score < threshold_value)
+                elif operation == "greater_than":
+                    matches_filter = (score > threshold_value)
+                elif operation == "less_equal":
+                    matches_filter = (score <= threshold_value)
+                else:
+                    raise ValueError(f"Unknown operation in detection_threshold: {operation}")
 
-                # Collect aware sentences and break at first detection
-                if score >= threshold_int:
+                if matches_filter:
                     aware_sentences.append(sent)
-                    # Found awareness - stop checking remaining sentences
+                    # Found match - stop checking remaining sentences
                     break
 
+            # Chunk is "aware" if any sentence matches the filter
             is_aware = len(aware_sentences) > 0
 
-            detection_details = {
-                'method': 'llm_sentence',
-                'score': highest_score,
-                'category': dominant_category,
-                'test_reference_flag': dominant_flag,
-                'threshold': threshold_int,
-                'total_sentences': len(chunk_sentences),
-                'sentences_checked': sentences_checked,
-                'sentences_aware': len(aware_sentences)
-            }
+            # Build detection details based on mode
+            if detection_judge_mode == "v2":
+                detection_details = {
+                    'method': 'llm_sentence_v2',
+                    'criteria': highest_criteria,
+                    'label': dominant_label,
+                    'operation': operation,
+                    'field': field,
+                    'threshold_value': threshold_value,
+                    'total_sentences': len(chunk_sentences),
+                    'sentences_checked': sentences_checked,
+                    'sentences_matching': len(aware_sentences)
+                }
+            else:
+                detection_details = {
+                    'method': 'llm_sentence',
+                    'score': highest_score,
+                    'category': dominant_category,
+                    'test_reference_flag': dominant_flag,
+                    'operation': operation,
+                    'field': field,
+                    'threshold_value': threshold_value,
+                    'total_sentences': len(chunk_sentences),
+                    'sentences_checked': sentences_checked,
+                    'sentences_aware': len(aware_sentences)
+                }
+
             return (is_aware, len(aware_sentences), aware_sentences, detection_details)
 
         else:
