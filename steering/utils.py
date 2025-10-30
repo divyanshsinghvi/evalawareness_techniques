@@ -507,9 +507,12 @@ def load_steering_vectors_from_npy(
     d_model: int,
     model_len: int,
     multiplier: float,
+    random_vector: bool = False,
+    seed: Optional[int] = None,
 ) -> dict[torch.Tensor, float]:
     """
     Load steering vectors from .npy files and format them for multi-layer steering.
+    Optionally generate random vectors matching the mean and variance of originals.
     
     Args:
         layer_indices: List of layer indices to apply steering to (e.g., [2, 6, 12])
@@ -517,6 +520,8 @@ def load_steering_vectors_from_npy(
         d_model: Model dimension (e.g., 8192 for Llama-70B)
         model_len: Total number of layers in the model (e.g., 48 for Llama-70B)
         multiplier: Scalar multiplier for the steering vector
+        random_vector: If True, generate random vectors with same mean/std as originals
+        seed: Random seed for reproducible random vector generation
     
     Returns:
         Dictionary mapping {steering_tensor: multiplier} ready for steer_and_generate()
@@ -541,9 +546,15 @@ def load_steering_vectors_from_npy(
     How it works:
         - Creates a tensor of shape (model_len, d_model) initialized to zeros
         - For each layer index in layer_indices, loads the corresponding L{i}.npy file
+        - If random_vector=True, generates random vectors with matching mean/std
         - Inserts the loaded vector at position i in the tensor
         - Returns {tensor: multiplier} format expected by steer_and_generate()
     """
+    # Set random seed if generating random vectors
+    if random_vector and seed is not None:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+    
     # Initialize zero tensor for all layers
     full_steering = torch.zeros(model_len, d_model, device='cuda')
     
@@ -555,17 +566,35 @@ def load_steering_vectors_from_npy(
             raise FileNotFoundError(f"Steering vector not found: {npy_path}")
         
         # Load numpy array and convert to torch tensor
-        steering_vec = np.load(npy_path)
+        original_vec = np.load(npy_path)
         
         # Validate shape
-        if steering_vec.shape != (d_model,):
+        if original_vec.shape != (d_model,):
             raise ValueError(
                 f"Expected shape ({d_model},) for layer {layer_idx}, "
-                f"got {steering_vec.shape}"
+                f"got {original_vec.shape}"
             )
         
+        if random_vector:
+            # Generate random vector with same mean and std as original
+            original_tensor = torch.from_numpy(original_vec)
+            vec_mean = original_tensor.mean()
+            vec_std = original_tensor.std()
+            
+            # Generate standard normal noise and scale/shift to match statistics
+            random_vec = torch.randn(d_model, dtype=original_tensor.dtype)
+            steering_vec = random_vec * vec_std + vec_mean
+            
+            # Calculate and print L2 norm ratio for verification
+            original_l2_norm = torch.norm(original_tensor).item()
+            generated_l2_norm = torch.norm(steering_vec).item()
+            l2_norm_ratio = generated_l2_norm / original_l2_norm
+            print(f"  Layer {layer_idx:3d}: L2 norm = {generated_l2_norm:8.6f} | Ratio to original = {l2_norm_ratio:.4f}")
+        else:
+            steering_vec = torch.from_numpy(original_vec)
+        
         # Insert into the full steering tensor at the correct layer position
-        full_steering[layer_idx] = torch.from_numpy(steering_vec).to('cuda')
+        full_steering[layer_idx] = steering_vec.to('cuda')
     
     # Return in the format expected by steer_and_generate
     # The dict maps tensor -> multiplier

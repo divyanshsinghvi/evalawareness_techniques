@@ -551,6 +551,7 @@ def main():
     parser.add_argument('--layer_range', type=int, nargs=2, required=True)
     parser.add_argument('--num_layers', type=int, nargs='+', required=True)
     parser.add_argument('--strength', type=float, nargs='+', required=True)
+    parser.add_argument('--random-vector', action='store_true', help='Generate random vectors with same mean/std as originals')
 
     args = parser.parse_args()
 
@@ -588,6 +589,7 @@ def main():
     print(f"  - Steer on user: {args.steer_on_user}")
     print(f"  - Steer on thinking: {args.steer_on_thinking}")
     print(f"  - Steer on system: {args.steer_on_system}")
+    print(f"  - Random vector: {args.random_vector}")
     print(f"\nSteering Parameters:")
     print(f"  - Layer range: {layer_range}")
     print(f"  - Num layers: {num_layers}")
@@ -663,11 +665,16 @@ def main():
                         layers, multiplier=multiplier,
                         steering_dir=args.steering_vec_dir,
                         d_model=args.d_model,
-                        model_len=args.model_len
+                        model_len=args.model_len,
+                        random_vector=args.random_vector,
+                        seed=seed
                     )
 
                     # Create results directory with layer/strength config
-                    config_resdir = os.path.join(full_out_dir, f"N{n}_S{s}")
+                    if args.random_vector:
+                        config_resdir = os.path.join(full_out_dir, f"N{n}_S{s}_random")
+                    else:
+                        config_resdir = os.path.join(full_out_dir, f"N{n}_S{s}")
                     print(f"Results directory: {config_resdir}")
 
                     ans = steer_and_generate(
