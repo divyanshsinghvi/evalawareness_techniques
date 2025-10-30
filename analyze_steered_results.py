@@ -576,14 +576,14 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
         print(f"\n{'Condition':<20} {'% A':>10} {'% B':>10} {'95% CI (B)':>25}")
         print(f"{'-'*20} {'-'*10} {'-'*10} {'-'*25}")
         if choice_stats['deploy_b_rate'] is not None:
-            print(f"{'Deployment':<20} {choice_stats['deploy_a_rate']:>9.1f}% {choice_stats['deploy_b_rate']:>9.1f}% "
-                  f"{f'[{choice_stats['deploy_ci_lower']:.1f}, {choice_stats['deploy_ci_upper']:.1f}]':>25}")
+            deploy_ci = f"[{choice_stats['deploy_ci_lower']:.1f}, {choice_stats['deploy_ci_upper']:.1f}]"
+            print(f"{'Deployment':<20} {choice_stats['deploy_a_rate']:>9.1f}% {choice_stats['deploy_b_rate']:>9.1f}% {deploy_ci:>25}")
         if choice_stats['orig_b_rate'] is not None:
-            print(f"{'Original Eval':<20} {choice_stats['orig_a_rate']:>9.1f}% {choice_stats['orig_b_rate']:>9.1f}% "
-                  f"{f'[{choice_stats['orig_ci_lower']:.1f}, {choice_stats['orig_ci_upper']:.1f}]':>25}")
+            orig_ci = f"[{choice_stats['orig_ci_lower']:.1f}, {choice_stats['orig_ci_upper']:.1f}]"
+            print(f"{'Original Eval':<20} {choice_stats['orig_a_rate']:>9.1f}% {choice_stats['orig_b_rate']:>9.1f}% {orig_ci:>25}")
         if choice_stats['steered_b_rate'] is not None:
-            print(f"{'Steered Eval':<20} {choice_stats['steered_a_rate']:>9.1f}% {choice_stats['steered_b_rate']:>9.1f}% "
-                  f"{f'[{choice_stats['steered_ci_lower']:.1f}, {choice_stats['steered_ci_upper']:.1f}]':>25}")
+            steered_ci = f"[{choice_stats['steered_ci_lower']:.1f}, {choice_stats['steered_ci_upper']:.1f}]"
+            print(f"{'Steered Eval':<20} {choice_stats['steered_a_rate']:>9.1f}% {choice_stats['steered_b_rate']:>9.1f}% {steered_ci:>25}")
     print()
 
     # Behavioral change statistics (treating seeds independently)
@@ -601,9 +601,11 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
             print(f"\nSample: {bc_stats['n_prompts']} prompts, {len(results_with_bc)} seeds")
             print(f"\n{'Condition':<20} {'BC Rate':>10} {'95% CI':>20} {'Change':>12} {'Change 95% CI':>25}")
             print(f"{'-'*20} {'-'*10} {'-'*20} {'-'*12} {'-'*25}")
-            print(f"{'Original (D→E)':<20} {bc_stats['orig_rate']:>9.1f}% {f'[{bc_stats['orig_ci_lower']:.1f}, {bc_stats['orig_ci_upper']:.1f}]':>20} {'-':>12} {'-':>25}")
+            orig_bc_ci = f"[{bc_stats['orig_ci_lower']:.1f}, {bc_stats['orig_ci_upper']:.1f}]"
+            print(f"{'Original (D→E)':<20} {bc_stats['orig_rate']:>9.1f}% {orig_bc_ci:>20} {'-':>12} {'-':>25}")
             delta_ci_str = f"[{bc_stats['delta_ci_lower']:.1f}, {bc_stats['delta_ci_upper']:.1f}]"
-            print(f"{'Steered (D→S)':<20} {bc_stats['steered_rate']:>9.1f}% {f'[{bc_stats['steered_ci_lower']:.1f}, {bc_stats['steered_ci_upper']:.1f}]':>20} {bc_stats['delta_mean']:>11.1f}% {delta_ci_str:>25}")
+            steered_bc_ci = f"[{bc_stats['steered_ci_lower']:.1f}, {bc_stats['steered_ci_upper']:.1f}]"
+            print(f"{'Steered (D→S)':<20} {bc_stats['steered_rate']:>9.1f}% {steered_bc_ci:>20} {bc_stats['delta_mean']:>11.1f}% {delta_ci_str:>25}")
 
         # BC breakdown by original awareness type
         print(f"\n{'Original Type':<25} {'N':>12} {'Orig BC':>10} {'Steer BC':>10} {'Change':>10}")
@@ -614,7 +616,8 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
             if type_bc_results:
                 type_bc_stats = compute_bc_clustered_stats(type_bc_results, use_clustering=False)
                 if type_bc_stats:
-                    print(f"{atype:<25} {f'{type_bc_stats['n_prompts']}p/{len(type_bc_results)}s':>12} "
+                    n_str = f"{type_bc_stats['n_prompts']}p/{len(type_bc_results)}s"
+                    print(f"{atype:<25} {n_str:>12} "
                           f"{type_bc_stats['orig_rate']:>9.1f}% {type_bc_stats['steered_rate']:>9.1f}% "
                           f"{type_bc_stats['steered_rate']-type_bc_stats['orig_rate']:>9.1f}%")
 
@@ -626,7 +629,8 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
             if type_bc_results:
                 type_bc_stats = compute_bc_clustered_stats(type_bc_results, use_clustering=False)
                 if type_bc_stats:
-                    print(f"{atype:<25} {f'{type_bc_stats['n_prompts']}p/{len(type_bc_results)}s':>12} "
+                    n_str = f"{type_bc_stats['n_prompts']}p/{len(type_bc_results)}s"
+                    print(f"{atype:<25} {n_str:>12} "
                           f"{type_bc_stats['orig_rate']:>9.1f}% {type_bc_stats['steered_rate']:>9.1f}% "
                           f"{type_bc_stats['steered_rate']-type_bc_stats['orig_rate']:>9.1f}%")
 
@@ -646,7 +650,8 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
             if len(trans_group) >= 10:  # Only show transitions with 10+ examples for reliable CIs
                 trans_bc_stats = compute_bc_clustered_stats(trans_group, use_clustering=False)
                 if trans_bc_stats and trans_bc_stats['n_prompts'] >= 3:  # Need 3+ unique prompts for reporting
-                    print(f"{trans_key:<30} {f'{trans_bc_stats['n_prompts']}p/{len(trans_group)}s':>12} "
+                    n_str = f"{trans_bc_stats['n_prompts']}p/{len(trans_group)}s"
+                    print(f"{trans_key:<30} {n_str:>12} "
                           f"{trans_bc_stats['orig_rate']:>9.1f}% {trans_bc_stats['steered_rate']:>9.1f}% "
                           f"{trans_bc_stats['steered_rate']-trans_bc_stats['orig_rate']:>9.1f}%")
 

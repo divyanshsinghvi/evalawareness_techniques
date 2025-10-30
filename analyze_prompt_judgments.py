@@ -6,14 +6,18 @@ Reads categorized prompt responses and generates statistical summaries.
 
 Usage:
     python analyze_prompt_judgments.py
+    python analyze_prompt_judgments.py --plot-mode  # Generate comparative plots
 """
 
 import yaml
 import json
+import argparse
 from pathlib import Path
 from typing import Dict, List
 import numpy as np
 from collections import defaultdict
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 import config
 
@@ -248,13 +252,264 @@ def generate_summary_report(stats: Dict) -> str:
     return "\n".join(lines)
 
 
+def load_all_statistics(categorize_prompts_dir: Path) -> Dict[str, Dict]:
+    """Load pre-computed statistics from all model directories.
+    
+    Args:
+        categorize_prompts_dir: Path to categorize_prompts directory
+        
+    Returns:
+        Dict mapping model_name -> statistics dict
+    """
+    all_stats = {}
+    
+    # Find all model directories
+    model_dirs = [d for d in categorize_prompts_dir.iterdir() if d.is_dir()]
+    
+    for model_dir in model_dirs:
+        stats_file = model_dir / 'summary' / 'statistics.json'
+        
+        if not stats_file.exists():
+            print(f"Warning: {stats_file} not found, skipping {model_dir.name}")
+            continue
+        
+        try:
+            with open(stats_file) as f:
+                stats = json.load(f)
+            all_stats[model_dir.name] = stats
+        except Exception as e:
+            print(f"Warning: Failed to load {stats_file}: {e}")
+            continue
+    
+    return all_stats
+
+
+def create_comparison_plots(all_stats: Dict[str, Dict], output_dir: Path):
+    """Create comprehensive comparison plots from statistics.
+    
+    Args:
+        all_stats: Dict mapping model_name -> statistics
+        output_dir: Directory to save plots
+    """
+    if not all_stats:
+        print("No statistics to plot!")
+        return
+    
+    # Set style
+    sns.set_style("whitegrid")
+    sns.set_palette("husl")
+    
+    # Create output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Extract model names
+    models = list(all_stats.keys())
+    
+    # Metrics to plot
+    metrics = ['scenario_realism', 'cue_integration_quality', 'cue_constraint_adherence', 'number_of_cues']
+    metric_labels = {
+        'scenario_realism': 'Scenario Realism',
+        'cue_integration_quality': 'Cue Integration Quality',
+        'cue_constraint_adherence': 'Cue Constraint Adherence',
+        'number_of_cues': 'Number of Cues'
+    }
+    
+    # 1. Overall Comparison Plot (all metrics)
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle('Judge Model Comparison - Overall Scores', fontsize=16, fontweight='bold')
+    
+    for idx, metric in enumerate(metrics):
+        ax = axes[idx // 2, idx % 2]
+        
+        # Prepare data
+        means = []
+        medians = []
+        stds = []
+        model_labels = []
+        
+        for model in models:
+            metric_data = all_stats[model].get('scores', {}).get(metric, {})
+            if metric_data:
+                means.append(metric_data.get('mean', 0))
+                medians.append(metric_data.get('median', 0))
+                stds.append(metric_data.get('std', 0))
+                model_labels.append(model.replace('_', '\n', 1))  # Break long names
+        
+        if not means:
+            continue
+        
+        x = np.arange(len(model_labels))
+        width = 0.35
+        
+        # Plot bars
+        bars1 = ax.bar(x - width/2, means, width, label='Mean', alpha=0.8)
+        bars2 = ax.bar(x + width/2, medians, width, label='Median', alpha=0.8)
+        
+        # Add error bars for std
+        ax.errorbar(x - width/2, means, yerr=stds, fmt='none', color='black', alpha=0.3, capsize=5)
+        
+        ax.set_xlabel('Judge Model', fontweight='bold')
+        ax.set_ylabel('Score', fontweight='bold')
+        ax.set_title(metric_labels[metric], fontweight='bold')
+        ax.set_xticks(x)
+        ax.set_xticklabels(model_labels, fontsize=9)
+        ax.legend()
+        ax.grid(axis='y', alpha=0.3)
+        
+        # Add value labels on bars
+        for bar in bars1:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{height:.2f}', ha='center', va='bottom', fontsize=8)
+    
+    plt.tight_layout()
+    plt.savefig(output_dir / 'overall_comparison.png', dpi=300, bbox_inches='tight')
+    print(f"  Saved: {output_dir / 'overall_comparison.png'}")
+    plt.close()
+    
+    # 2. Bucket Comparison Plot
+    # Get all unique buckets
+    all_buckets = set()
+    for stats in all_stats.values():
+        all_buckets.update(stats.get('by_bucket', {}).keys())
+    
+    buckets = sorted(all_buckets)
+    
+    if buckets:
+        fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+        fig.suptitle('Judge Model Comparison - By Bucket', fontsize=16, fontweight='bold')
+        
+        for idx, metric in enumerate(metrics):
+            ax = axes[idx // 2, idx % 2]
+            
+            # Prepare data: bucket -> model -> mean
+            bucket_data = defaultdict(dict)
+            
+            for model in models:
+                model_label = model.replace('_', ' ')
+                by_bucket = all_stats[model].get('by_bucket', {})
+                
+                for bucket in buckets:
+                    if bucket in by_bucket:
+                        metric_data = by_bucket[bucket].get('scores', {}).get(metric, {})
+                        if metric_data:
+                            bucket_data[bucket][model_label] = metric_data.get('mean', 0)
+            
+            # Plot grouped bars
+            x = np.arange(len(buckets))
+            width = 0.8 / len(models) if models else 0.35
+            
+            for i, model in enumerate(models):
+                model_label = model.replace('_', ' ')
+                values = [bucket_data[bucket].get(model_label, 0) for bucket in buckets]
+                offset = (i - len(models)/2 + 0.5) * width
+                ax.bar(x + offset, values, width, label=model_label, alpha=0.8)
+            
+            ax.set_xlabel('Bucket', fontweight='bold')
+            ax.set_ylabel('Mean Score', fontweight='bold')
+            ax.set_title(metric_labels[metric], fontweight='bold')
+            ax.set_xticks(x)
+            ax.set_xticklabels(buckets, rotation=45, ha='right', fontsize=9)
+            ax.legend(fontsize=8)
+            ax.grid(axis='y', alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(output_dir / 'bucket_comparison.png', dpi=300, bbox_inches='tight')
+        print(f"  Saved: {output_dir / 'bucket_comparison.png'}")
+        plt.close()
+    
+    # 3. Distribution Comparison (Heatmap style)
+    for metric in metrics:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        # Prepare data for heatmap
+        ranges = ['1-2', '3-4', '5-6', '7-8', '9-10']
+        heatmap_data = []
+        model_labels = []
+        
+        for model in models:
+            metric_data = all_stats[model].get('scores', {}).get(metric, {})
+            if metric_data and 'distribution' in metric_data:
+                dist = metric_data['distribution']
+                row = [dist.get(r, 0) for r in ranges]
+                heatmap_data.append(row)
+                model_labels.append(model.replace('_', '\n', 1))
+        
+        if heatmap_data:
+            # Convert to percentages
+            heatmap_data_pct = []
+            for row in heatmap_data:
+                total = sum(row)
+                if total > 0:
+                    heatmap_data_pct.append([x/total*100 for x in row])
+                else:
+                    heatmap_data_pct.append([0]*len(row))
+            
+            sns.heatmap(heatmap_data_pct, annot=True, fmt='.1f', cmap='YlOrRd',
+                       xticklabels=ranges, yticklabels=model_labels,
+                       cbar_kws={'label': 'Percentage (%)'}, ax=ax)
+            
+            ax.set_title(f'{metric_labels[metric]} - Distribution Comparison (%)', 
+                        fontweight='bold', fontsize=14)
+            ax.set_xlabel('Score Range', fontweight='bold')
+            ax.set_ylabel('Judge Model', fontweight='bold')
+            
+            plt.tight_layout()
+            plt.savefig(output_dir / f'distribution_{metric}.png', dpi=300, bbox_inches='tight')
+            print(f"  Saved: {output_dir / f'distribution_{metric}.png'}")
+            plt.close()
+    
+    print(f"\nAll plots saved to: {output_dir}")
+
+
 def main():
+    parser = argparse.ArgumentParser(description='Analyze prompt judgment statistics')
+    parser.add_argument('--plot-mode', action='store_true',
+                       help='Generate comparative plots from pre-computed statistics')
+    
+    args = parser.parse_args()
+    
     categorize_prompts_dir = config.WORKING_DIR / 'categorize_prompts'
     
     if not categorize_prompts_dir.exists():
         print(f"Error: {categorize_prompts_dir} not found")
         return 1
     
+    # PLOT MODE - Generate comparative visualizations
+    if args.plot_mode:
+        print(f"{'='*80}")
+        print(f"PLOT MODE - GENERATE COMPARATIVE VISUALIZATIONS")
+        print(f"{'='*80}")
+        print(f"Loading statistics from: {categorize_prompts_dir}")
+        print()
+        
+        # Load all pre-computed statistics
+        all_stats = load_all_statistics(categorize_prompts_dir)
+        
+        if not all_stats:
+            print("No statistics found! Run without --plot-mode first to compute statistics.")
+            return 1
+        
+        print(f"Loaded statistics for {len(all_stats)} judge models:")
+        for model_name in all_stats.keys():
+            print(f"  - {model_name}")
+        print()
+        
+        # Create plots
+        plot_dir = Path('evalawareness_techniques/plot_stats/prompt_stats')
+        print("Generating comparison plots...")
+        create_comparison_plots(all_stats, plot_dir)
+        
+        print()
+        print(f"{'='*80}")
+        print(f"PLOT MODE COMPLETE")
+        print(f"{'='*80}")
+        print(f"Plots saved to: {plot_dir}")
+        print(f"{'='*80}")
+        
+        return 0
+    
+    # STANDARD MODE - Compute statistics from YAML files
     print(f"{'='*80}")
     print(f"ANALYZE PROMPT JUDGMENTS")
     print(f"{'='*80}")
