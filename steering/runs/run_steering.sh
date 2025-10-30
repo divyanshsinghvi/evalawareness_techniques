@@ -39,6 +39,7 @@ MODEL_LEN=48
 STEER_ON_USER=true
 STEER_ON_THINKING=true
 STEER_ON_SYSTEM=false
+RANDOM_VECTOR=false  # Set to true to use random vectors with matching mean/std
 
 # Generation settings
 BATCH_SIZE=128
@@ -84,10 +85,15 @@ echo "  Model: $MODEL"
 echo "  Mode: $MODE"
 echo "  Priority: $PRIORITY"
 echo "  Vec type: $VEC_TYPE"
+echo "  Random vector: $RANDOM_VECTOR"
 echo "  Seeds: ${SEEDS[@]} (${#SEEDS[@]} seed(s))"
 echo "  Num layers: ${NUM_LAYERS[@]}"
 echo "  Strengths: ${STRENGTH[@]}"
-echo "  Output: $FULL_OUTPUT_DIR/N{n}_S{s}/"
+if [ "$RANDOM_VECTOR" = true ]; then
+  echo "  Output: $FULL_OUTPUT_DIR/N{n}_S{s}_random/"
+else
+  echo "  Output: $FULL_OUTPUT_DIR/N{n}_S{s}/"
+fi
 echo ""
 
 # Build the base command
@@ -113,7 +119,8 @@ python steer_model.py \
   --strength ${STRENGTH[@]} \
   $([ "$STEER_ON_USER" = true ] && echo "--steer_on_user" || echo "") \
   $([ "$STEER_ON_THINKING" = true ] && echo "--steer_on_thinking" || echo "") \
-  $([ "$STEER_ON_SYSTEM" = true ] && echo "--steer_on_system" || echo "")
+  $([ "$STEER_ON_SYSTEM" = true ] && echo "--steer_on_system" || echo "") \
+  $([ "$RANDOM_VECTOR" = true ] && echo "--random-vector" || echo "")
 
 echo ""
 echo "=========================================="
