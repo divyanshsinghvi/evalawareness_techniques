@@ -231,6 +231,8 @@ async def generate_with_suppression(
     Reasoning Strategies:
         - "chunk_resample": Parse reasoning into chunks, resample aware chunks
           (most efficient, preserves maximum reasoning)
+        - "resample_best_of_n": Parse into chunks, for each aware chunk generate N samples and pick lowest score
+          (explores multiple alternatives, picks best - more API calls but potentially better quality)
         - "seed": Extract clean prefix from aware reasoning, use as seed for next gen
           (good for steering model away from consistent awareness patterns)
         - "hybrid": Try chunk resampling first, fall back to seeding if fails
@@ -252,12 +254,12 @@ async def generate_with_suppression(
         system_prompt: Optional system prompt
         model_name: Model to use (OpenRouter format)
         chunk_strategy: "sentence" or "paragraph" chunking for content
-        reasoning_strategy: "chunk_resample", "seed", "hybrid", "remove_only_till_first", or "remove_only"
+        reasoning_strategy: "chunk_resample", "resample_best_of_n", "seed", "hybrid", "remove_only_till_first", or "remove_only"
         initial_reasoning_till_first: Pre-existing clean reasoning up to first aware sentence (optional)
         initial_reasoning_all: Pre-existing clean reasoning (all clean sentences) (optional)
         initial_content: Pre-existing clean content to start with (optional)
         max_iterations: Maximum resampling operations allowed
-        max_resample_attempts_per_chunk: Attempts to regenerate each eval-aware chunk
+        max_resample_attempts_per_chunk: For chunk_resample: max attempts per chunk; for resample_best_of_n: number of samples to generate
         temperature: Sampling temperature
         max_tokens: Maximum token cap (never exceed this)
         adaptive_tokens: Enable adaptive token growth (recommended)
@@ -896,6 +898,199 @@ async def generate_with_suppression(
                         print(f"     🔄 Continuing to generate remaining reasoning...")
                     # Continue to next iteration to generate more reasoning
                     continue
+
+            elif reasoning_strategy == "resample_best_of_n":
+                if verbose >= 2:
+                    print(f"\n  📝 Processing reasoning with resample_best_of_n strategy")
+                    print(f"     Will resample {max_resample_attempts_per_chunk} times and pick lowest score...")
+
+                # Parse reasoning into chunks and process each
+                reasoning_chunks = parse_into_chunks(continuation_reasoning, chunk_strategy)
+                clean_reasoning_chunks = []
+                aware_chunk_found = False
+
+                for r_idx, r_chunk in enumerate(reasoning_chunks):
+                    r_chunk_is_aware, r_chunk_count, r_chunk_sentences, r_chunk_details = await is_chunk_aware(r_chunk)
+                    if r_chunk_is_aware:
+                        # Found aware reasoning chunk - generate N samples and pick best
+                        aware_chunk_found = True
+                        had_awareness_this_iteration = True
+                        resampling_iterations += 1
+                        total_awareness_detected += r_chunk_count
+                        all_detected_aware_sentences.extend(r_chunk_sentences)
+
+                        if verbose >= 2:
+                            print(f"\n     🧠 Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: AWARE ({r_chunk_count} indicators)")
+                            if r_chunk_details.get('method') == 'llm_sentence':
+                                print(f"        Judge: {r_chunk_details.get('sentences_aware')}/{r_chunk_details.get('total_sentences')} sentences aware (highest score={r_chunk_details.get('score')}, category={r_chunk_details.get('category')}, flag={r_chunk_details.get('test_reference_flag')})")
+                            original_chunk_preview = r_chunk[:120].replace('\n', ' ')
+                            print(f"        ORIGINAL: \"{original_chunk_preview}...\"")
+
+                        # Generate N samples and score each
+                        samples = []  # List of (chunk_text, score, is_aware, details)
+                        if verbose >= 2:
+                            print(f"     🔄 Generating {max_resample_attempts_per_chunk} samples to find best...")
+
+                        for attempt in range(max_resample_attempts_per_chunk):
+                            # Generate deterministic seed based on context
+                            resample_seed = generate_deterministic_seed(
+                                context=user_message[:100],
+                                iteration=resampling_iterations,
+                                chunk_idx=r_idx,
+                                resample_attempt=attempt,
+                                base_seed=base_seed
+                            )
+
+                            # Regenerate reasoning continuation from clean prefix
+                            if clean_reasoning_chunks:
+                                temp_clean_reasoning = clean_reasoning + ''.join(clean_reasoning_chunks)
+                            else:
+                                temp_clean_reasoning = clean_reasoning
+
+                            regen_messages = client.format_messages_with_prefill(
+                                base_messages=base_messages,
+                                prefill_content="",
+                                prefill_reasoning=temp_clean_reasoning
+                            )
+
+                            regen_response = await client.generate(regen_messages, max_tokens=100, seed=resample_seed)
+                            total_api_time += regen_response.api_time
+                            api_call_count += 1
+                            suppression_model_api_time += regen_response.api_time
+                            suppression_model_api_calls += 1
+                            regen_reasoning = regen_response.reasoning
+
+                            if regen_reasoning:
+                                regen_r_chunks = parse_into_chunks(regen_reasoning, chunk_strategy)
+                                if regen_r_chunks:
+                                    first_regen_chunk = regen_r_chunks[0]
+                                    first_chunk_is_aware, first_chunk_count, first_chunk_aware_sentences, first_chunk_details = await is_chunk_aware(first_regen_chunk)
+
+                                    # Get score (use awareness intensity for LLM judge, count for rule-based)
+                                    score = first_chunk_details.get('score', first_chunk_count)
+
+                                    samples.append({
+                                        'attempt': attempt + 1,
+                                        'chunk_text': first_regen_chunk,
+                                        'is_aware': first_chunk_is_aware,
+                                        'awareness_count': first_chunk_count,
+                                        'score': score,
+                                        'details': first_chunk_details,
+                                        'aware_sentences': first_chunk_aware_sentences.copy()
+                                    })
+
+                                    if verbose >= 2:
+                                        regen_preview = first_regen_chunk[:100].replace('\n', ' ')
+                                        if first_chunk_details.get('method') == 'llm_sentence':
+                                            print(f"        Sample {attempt + 1}: score={score}, {first_chunk_details.get('test_reference_flag', 'N/A')}")
+                                            print(f"                   \"{regen_preview}...\"")
+
+                        # Pick sample with lowest score (with tie-breaking)
+                        if samples:
+                            # Define awareness category hierarchy (lower rank = better)
+                            category_rank = {
+                                'No Awareness': 0,
+                                'Surface Awareness': 1,
+                                'Tentative Awareness': 2,
+                                'Reflective / Meta-Aware': 3,
+                                'Explicit Meta-Recognition': 4
+                            }
+
+                            # Define test reference type hierarchy (lower rank = better)
+                            type_rank = {
+                                'no_test_reference': 0,  # Best - no awareness of testing
+                                'other_test': 1,         # Middle - talking about others being tested
+                                'self_test': 2           # Worst - aware of being tested themselves
+                            }
+
+                            def get_sort_key(s):
+                                """Multi-level tie-breaking:
+                                1. Score (lower better)
+                                2. Category rank (No Awareness best, Explicit Meta-Recognition worst)
+                                3. Type rank (no_test_reference best, self_test worst)
+                                4. Awareness count (lower better)
+                                5. Attempt number (earlier better)
+                                """
+                                details = s['details']
+                                category = details.get('category', 'Unknown')
+                                test_ref_flag = details.get('test_reference_flag', 'no_test_reference')
+
+                                # Get ranks with fallback to worst rank if unknown
+                                cat_rank = category_rank.get(category, 999)
+                                typ_rank = type_rank.get(test_ref_flag, 999)
+
+                                return (
+                                    s['score'],           # Primary: score
+                                    cat_rank,             # Secondary: category
+                                    typ_rank,             # Tertiary: type
+                                    s['awareness_count'], # Quaternary: count
+                                    s['attempt']          # Quinary: attempt number
+                                )
+
+                            best_sample = min(samples, key=get_sort_key)
+
+                            if verbose >= 2:
+                                # Check if there were ties on score
+                                tied_samples = [s for s in samples if s['score'] == best_sample['score']]
+                                if len(tied_samples) > 1:
+                                    best_category = best_sample['details'].get('category', 'Unknown')
+                                    best_type = best_sample['details'].get('test_reference_flag', 'no_test_reference')
+                                    print(f"     ✓ Selected sample {best_sample['attempt']} with score={best_sample['score']} (tied with {len(tied_samples)-1} others)")
+                                    print(f"        Broke tie by: category={best_category}, type={best_type}, count={best_sample['awareness_count']}")
+                                else:
+                                    print(f"     ✓ Selected sample {best_sample['attempt']} with score={best_sample['score']} (best of {len(samples)})")
+
+                            # Record all attempts
+                            resample_attempts_list = [
+                                ResampleAttempt(
+                                    attempt_number=s['attempt'],
+                                    chunk_text=s['chunk_text'],
+                                    is_aware=s['is_aware'],
+                                    awareness_count=s['awareness_count'],
+                                    detection_details=s['details'],
+                                    aware_sentences=s['aware_sentences']
+                                )
+                                for s in samples
+                            ]
+
+                            # Record resample details
+                            chunk_resample_details.append(ChunkResampleInfo(
+                                iteration=resampling_iterations,
+                                chunk_index=r_idx,
+                                chunk_type="reasoning",
+                                original_chunk=r_chunk,
+                                original_detection=r_chunk_details,
+                                attempts=resample_attempts_list,
+                                attempts_needed=len(samples),
+                                final_chunk=best_sample['chunk_text'],
+                                success=not best_sample['is_aware']
+                            ))
+
+                            # Use best sample
+                            clean_reasoning_chunks.append(best_sample['chunk_text'])
+
+                        else:
+                            # No valid samples generated - this shouldn't happen but handle it
+                            if verbose >= 2:
+                                print(f"        ⚠️  No valid samples generated")
+                            break
+
+                    else:
+                        # Chunk is clean, use it
+                        clean_reasoning_chunks.append(r_chunk)
+                        if verbose and r_chunk_details.get('method') == 'llm_sentence':
+                            print(f"     ✓ Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: CLEAN (score={r_chunk_details.get('score', 0)}, category={r_chunk_details.get('category', 'Unknown')}, flag={r_chunk_details.get('test_reference_flag', 'unknown')})")
+
+                # After processing all chunks, add to accumulated reasoning
+                if clean_reasoning_chunks:
+                    clean_reasoning += ''.join(clean_reasoning_chunks)
+                    handled = True
+                    if verbose >= 2:
+                        print(f"     ✓ Processed {len(clean_reasoning_chunks)} reasoning chunks")
+
+                # For resample_best_of_n, we don't continue - we process full reasoning in one pass
+                # If there was awareness, we've resampled each aware chunk with best-of-n
+                # Now continue to content generation
 
             else:
                 # For other strategies (seed, hybrid), check full reasoning first
