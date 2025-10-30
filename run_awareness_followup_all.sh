@@ -7,6 +7,7 @@ set -e
 EVALUATED_MODEL="qwen_qwen3-32b"  # The model being evaluated (filesystem-safe name for directory paths) - can be overridden with --model
 JUDGE_MODEL="qwen/qwen3-32b"  # The model that answers the follow-up question (API format, always fixed)
 MODE="ternary"  # binary (yes/no) or ternary (yes/no/unsure) - can be overridden with --mode
+QUESTION_TYPE="awareness"  # awareness or counterfactual - can be overridden with --question-type
 LIMIT_SEEDS=29
 CONCURRENCY=100
 VERBOSE=""  # Set to "--verbose" to show detailed output
@@ -45,9 +46,17 @@ while [[ $# -gt 0 ]]; do
             EVALUATED_MODEL="$2"
             shift 2
             ;;
+        --question-type)
+            QUESTION_TYPE="$2"
+            if [[ "$QUESTION_TYPE" != "awareness" && "$QUESTION_TYPE" != "counterfactual" ]]; then
+                echo "Error: --question-type must be 'awareness' or 'counterfactual'"
+                exit 1
+            fi
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--skip EXPERIMENT_NAME] [--only EXPERIMENT_NAME] [--mode binary|ternary] [--verbose] [--concurrency N] [--model MODEL]"
+            echo "Usage: $0 [--skip EXPERIMENT_NAME] [--only EXPERIMENT_NAME] [--mode binary|ternary] [--question-type awareness|counterfactual] [--verbose] [--concurrency N] [--model MODEL]"
             exit 1
             ;;
     esac
@@ -102,6 +111,7 @@ run_followup() {
         --model "$JUDGE_MODEL" \
         --concurrency "$CONCURRENCY" \
         --mode "$MODE" \
+        --question-type "$QUESTION_TYPE" \
         --max-seed "$LIMIT_SEEDS" \
         --skip-existing \
         $VERBOSE \
