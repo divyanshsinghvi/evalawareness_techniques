@@ -508,10 +508,13 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
             # Main awareness table
             print(f"\n{'Condition':<20} {'Mean':>8} {'95% CI':>20} {'Reduction':>12}")
             print(f"{'-'*20} {'-'*8} {'-'*20} {'-'*12}")
-            print(f"{'Deployment':<20} {deploy_stats['mean']:>8.2f} {f'[{deploy_stats['ci_lower']:.2f}, {deploy_stats['ci_upper']:.2f}]':>20} {'-':>12}")
-            print(f"{'Original Eval':<20} {orig_stats['mean']:>8.2f} {f'[{orig_stats['ci_lower']:.2f}, {orig_stats['ci_upper']:.2f}]':>20} {'-':>12}")
+            deploy_ci = f"[{deploy_stats['ci_lower']:.2f}, {deploy_stats['ci_upper']:.2f}]"
+            print(f"{'Deployment':<20} {deploy_stats['mean']:>8.2f} {deploy_ci:>20} {'-':>12}")
+            orig_ci = f"[{orig_stats['ci_lower']:.2f}, {orig_stats['ci_upper']:.2f}]"
+            print(f"{'Original Eval':<20} {orig_stats['mean']:>8.2f} {orig_ci:>20} {'-':>12}")
             orig_reduction = orig_stats['mean'] - deploy_stats['mean']
-            print(f"{'Steered Eval':<20} {steered_stats['mean']:>8.2f} {f'[{steered_stats['ci_lower']:.2f}, {steered_stats['ci_upper']:.2f}]':>20} {steered_stats['mean'] - orig_stats['mean']:>12.2f}")
+            steered_ci = f"[{steered_stats['ci_lower']:.2f}, {steered_stats['ci_upper']:.2f}]"
+            print(f"{'Steered Eval':<20} {steered_stats['mean']:>8.2f} {steered_ci:>20} {steered_stats['mean'] - orig_stats['mean']:>12.2f}")
 
             print(f"\nSample: {deploy_stats['n_prompts']} prompts, {deploy_stats['n_seeds']} seeds (~{deploy_stats['n_seeds']/deploy_stats['n_prompts']:.0f} seeds/prompt)")
 
@@ -552,7 +555,9 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
             steer_count = type_counts.get(atype, 0)
             steer_pct = (steer_count / len(results)) * 100
             change = steer_pct - orig_pct
-            print(f"{atype:<25} {f'{orig_count} ({orig_pct:.1f}%)':>15} {f'{steer_count} ({steer_pct:.1f}%)':>15} {change:>9.1f}%")
+            orig_str = f'{orig_count} ({orig_pct:.1f}%)'
+            steer_str = f'{steer_count} ({steer_pct:.1f}%)'
+            print(f"{atype:<25} {orig_str:>15} {steer_str:>15} {change:>9.1f}%")
     else:
         print(f"\nSteered awareness type distribution:")
         for atype, count in sorted(type_counts.items(), key=lambda x: x[1], reverse=True):
