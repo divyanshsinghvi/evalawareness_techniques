@@ -1,8 +1,12 @@
 """Concatenate multiple checkpoint files into a single larger checkpoint."""
 
+import sys
 import pickle
 import argparse
 from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 def concatenate_checkpoints(checkpoint_paths, output_path):
     """
