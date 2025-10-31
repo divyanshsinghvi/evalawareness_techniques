@@ -119,9 +119,11 @@ async def extract_clean_reasoning_seed(
     judge_client = None,
     judge_model: str = None,
     mode: str = None,
+    detection_judge_mode: str = None,
     verbose: int = 0,
     rollout_file: Path = None,
-    model_dir: str = None
+    model_dir: str = None,
+    user_prompt: str = ""
 ) -> tuple:
     """
     Extract clean reasoning seed from a response.
@@ -148,7 +150,7 @@ async def extract_clean_reasoning_seed(
     Returns:
         tuple: (seed_string, stats_dict)
     """
-    from score_awareness_with_llm import score_sentence
+    from score_awareness_with_llm import score_sentence, score_sentence_v2
 
     # Extract reasoning from thinking tags
     thinking_match = re.search(r'<think(?:ing)?>(.*?)</think(?:ing)?>', response, re.DOTALL)
@@ -162,8 +164,12 @@ async def extract_clean_reasoning_seed(
     categorized_sentences = []
 
     if rollout_file and model_dir and detection_mode == "llm_sentence":
+        # Use detection_judge_mode (not mode) for categorization path
+        # This ensures we load the right scores for the detection judge being used
+        judge_mode_for_cat = detection_judge_mode if detection_judge_mode else mode
+
         # Construct path to categorization file
-        categorization_dir = config.SENTENCE_CATEGORIZATION_DIR / mode / model_dir
+        categorization_dir = config.SENTENCE_CATEGORIZATION_DIR / judge_mode_for_cat / model_dir
         rollouts_dir = config.ROLLOUTS_DIR / model_dir
 
         # Normalize path to handle numbered overflow directories (explicit1 -> explicit)
@@ -171,34 +177,41 @@ async def extract_clean_reasoning_seed(
         normalized_path = normalize_numbered_directory_path(relative_path)
         categorization_file = categorization_dir / normalized_path
 
-        if not categorization_file.exists():
-            raise FileNotFoundError(
-                f"Categorization data not found: {categorization_file}\n"
-                f"Please run categorize_rollouts.py first:\n"
-                f"  python categorize_rollouts.py --model-dir {model_dir}"
-            )
+        if categorization_file.exists():
+            # Load pre-existing categorization data
+            if verbose >= 2:
+                print(f"  📂 Loading categorization data ({judge_mode_for_cat}): {categorization_file.name}")
 
-        if verbose >= 2:
-            print(f"  📂 Loading categorization data: {categorization_file.name}")
+            with open(categorization_file) as f:
+                cat_data = yaml.safe_load(f)
 
-        with open(categorization_file) as f:
-            cat_data = yaml.safe_load(f)
+            # Get evaluation branch sentences (from thinking tags)
+            eval_categorized = cat_data.get('evaluation', {}).get('categorized_sentences', [])
 
-        # Get evaluation branch sentences (from thinking tags)
-        eval_categorized = cat_data.get('evaluation', {}).get('categorized_sentences', [])
+            # Filter to only thinking sentences
+            categorized_sentences = [s for s in eval_categorized if s.get('source') == 'thinking']
 
-        # Filter to only thinking sentences
-        categorized_sentences = [s for s in eval_categorized if s.get('source') == 'thinking']
+            if not categorized_sentences:
+                # File exists but has no thinking sentences - treat as missing/incomplete
+                # Fall back to on-the-fly scoring
+                if verbose >= 2:
+                    print(f"  ⚠️  Categorization file incomplete (no thinking sentences): {categorization_file}")
+                    print(f"  🔄 Will score on-the-fly with {judge_mode_for_cat} judge and cache results")
+                use_existing_data = False
+            else:
+                use_existing_data = True
+                if verbose >= 2:
+                    print(f"  ✓ Using {len(categorized_sentences)} pre-scored sentences from categorization")
 
-        if not categorized_sentences:
-            raise ValueError(
-                f"No thinking sentences found in categorization data: {categorization_file}\n"
-                f"The categorization file may be corrupted or incomplete."
-            )
+        else:
+            # Categorization file doesn't exist - score on-the-fly and cache
+            if verbose >= 2:
+                print(f"  ⚠️  Categorization file not found: {categorization_file}")
+                print(f"  🔄 Will score on-the-fly with {judge_mode_for_cat} judge and cache results")
 
-        use_existing_data = True
-        if verbose >= 2:
-            print(f"  ✓ Using {len(categorized_sentences)} pre-scored sentences from categorization")
+            # We'll fall through to on-the-fly scoring below
+            # Don't raise error - just proceed with on-the-fly scoring
+            use_existing_data = False
 
     # Process sentences
     clean_reasoning_parts_till_first = []  # Clean sentences until first aware
@@ -209,14 +222,37 @@ async def extract_clean_reasoning_seed(
 
     if use_existing_data:
         # Use pre-scored categorization data
-        threshold_int = int(detection_threshold)
+        # Parse threshold format
+        threshold_parts = detection_threshold.split(':')
+        if len(threshold_parts) == 3:
+            operation, field, value = threshold_parts
+            threshold_value = int(value)
+        else:
+            # Legacy format
+            operation = "greater_equal"
+            field = "score"
+            threshold_value = int(detection_threshold)
 
         for idx, sent_data in enumerate(categorized_sentences):
             sent = sent_data['sentence']
             score = sent_data.get('score', 0)
             test_ref_flag = sent_data.get('test_reference_flag', 'no_test_reference')
 
-            is_aware = score >= threshold_int
+            # Check if sentence matches filter
+            if operation == "exclude" and field == "score":
+                is_aware = (score == threshold_value)
+            elif operation == "greater_equal":
+                is_aware = (score >= threshold_value)
+            elif operation == "less_than":
+                is_aware = (score < threshold_value)
+            elif operation == "greater_than":
+                is_aware = (score > threshold_value)
+            elif operation == "less_equal":
+                is_aware = (score <= threshold_value)
+            else:
+                # Fallback to legacy behavior
+                is_aware = (score >= threshold_value)
+
             awareness_info = ""
 
             # Apply removal mode filtering
@@ -254,8 +290,21 @@ async def extract_clean_reasoning_seed(
                         remaining_sent = categorized_sentences[remaining_idx]['sentence']
                         remaining_score = categorized_sentences[remaining_idx].get('score', 0)
                         remaining_flag = categorized_sentences[remaining_idx].get('test_reference_flag', 'no_test_reference')
-                        # Check if remaining sentence is also aware
-                        remaining_is_aware = remaining_score >= threshold_int
+
+                        # Check if remaining sentence is also aware using same threshold logic
+                        if operation == "exclude" and field == "score":
+                            remaining_is_aware = (remaining_score == threshold_value)
+                        elif operation == "greater_equal":
+                            remaining_is_aware = (remaining_score >= threshold_value)
+                        elif operation == "less_than":
+                            remaining_is_aware = (remaining_score < threshold_value)
+                        elif operation == "greater_than":
+                            remaining_is_aware = (remaining_score > threshold_value)
+                        elif operation == "less_equal":
+                            remaining_is_aware = (remaining_score <= threshold_value)
+                        else:
+                            remaining_is_aware = (remaining_score >= threshold_value)
+
                         if removal_mode == "self_test_only":
                             remaining_is_aware = remaining_is_aware and (remaining_flag == "self_test")
                         if remaining_is_aware:
@@ -270,10 +319,18 @@ async def extract_clean_reasoning_seed(
         # On-the-fly detection (for rule_based mode or when categorization not available)
         reasoning_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])|(?<=[.!?])\n+', eval_reasoning)
 
+        # For caching: collect scored sentences
+        on_the_fly_scored_sentences = []
+        judge_mode_for_cat = detection_judge_mode if detection_judge_mode else mode
+
         for idx, sent in enumerate(reasoning_sentences):
             # Check awareness using same detection mode as experiment
             is_aware = False
             awareness_info = ""
+            score = 0
+            test_ref_flag = 'no_test_reference'
+            criteria = None
+            label = None
 
             if detection_mode == "rule_based":
                 sent_awareness = analyze_awareness_levels(sent)
@@ -290,14 +347,69 @@ async def extract_clean_reasoning_seed(
 
             elif detection_mode == "llm_sentence":
                 if judge_client and judge_model:
-                    result = await score_sentence(judge_client, sent, judge_model, mode)
-                    score = result.get('score', 0)
-                    test_ref_flag = result.get('test_reference_flag', 'no_test_reference')
-                    threshold_int = int(detection_threshold)
-                    is_aware = score >= threshold_int
+                    # Use detection_judge_mode to determine which scoring function to use
+                    if judge_mode_for_cat == "v2":
+                        # V2 mode: 3-category classifier
+                        # Need user_prompt for context - extract from response or use placeholder
+                        user_prompt = ""  # V2 needs user prompt for context, but we don't have it here
+                        # For now, use empty string - this is a limitation of on-the-fly scoring
+                        result = await score_sentence_v2(judge_client, sent, user_prompt, judge_model)
+                        criteria = result.get('criteria', 3)
+                        label = result.get('label', 'neither')
+                        score = criteria  # Use criteria as score for compatibility
+                        test_ref_flag = 'no_test_reference'  # V2 doesn't have test_reference_flag
+                    else:
+                        # V0/V1 mode: awareness intensity scoring
+                        result = await score_sentence(judge_client, sent, judge_model, judge_mode_for_cat)
+                        score = result.get('score', 0)
+                        test_ref_flag = result.get('test_reference_flag', 'no_test_reference')
 
-                    # Apply removal mode filtering
-                    if is_aware:
+                    # Store for caching
+                    if judge_mode_for_cat == "v2":
+                        on_the_fly_scored_sentences.append({
+                            'sentence': sent,
+                            'criteria': criteria,
+                            'label': label,
+                            'source': 'thinking'
+                        })
+                    else:
+                        on_the_fly_scored_sentences.append({
+                            'sentence': sent,
+                            'score': score,
+                            'test_reference_flag': test_ref_flag,
+                            'source': 'thinking'
+                        })
+
+                    # Parse threshold format
+                    threshold_parts = detection_threshold.split(':')
+                    if len(threshold_parts) == 3:
+                        operation, field, value = threshold_parts
+                        threshold_value = int(value)
+                    else:
+                        # Legacy format
+                        operation = "greater_equal"
+                        field = "score"
+                        threshold_value = int(detection_threshold)
+
+                    # Check if sentence matches filter (handle both score and criteria)
+                    value_to_check = criteria if (field == "criteria" and criteria is not None) else score
+
+                    if operation == "exclude":
+                        is_aware = (value_to_check == threshold_value)
+                    elif operation == "greater_equal":
+                        is_aware = (value_to_check >= threshold_value)
+                    elif operation == "less_than":
+                        is_aware = (value_to_check < threshold_value)
+                    elif operation == "greater_than":
+                        is_aware = (value_to_check > threshold_value)
+                    elif operation == "less_equal":
+                        is_aware = (value_to_check <= threshold_value)
+                    else:
+                        # Fallback to legacy behavior
+                        is_aware = (value_to_check >= threshold_value)
+
+                    # Apply removal mode filtering (only for v0/v1 with test_reference_flag)
+                    if is_aware and judge_mode_for_cat != "v2":
                         if removal_mode == "self_test_only":
                             # Only remove if it's self_test awareness
                             is_aware = (test_ref_flag == "self_test")
@@ -312,6 +424,9 @@ async def extract_clean_reasoning_seed(
                             awareness_info = f"score={score}, {test_ref_flag}"
                         else:
                             awareness_info = f"score={score}, {test_ref_flag}"
+                    elif is_aware and judge_mode_for_cat == "v2":
+                        # V2 mode: use criteria/label for awareness info
+                        awareness_info = f"criteria={criteria}, {label}"
 
             if not is_aware:
                 # Always add to clean_all
@@ -320,7 +435,12 @@ async def extract_clean_reasoning_seed(
                 if detection_mode == "rule_based":
                     clean_sentences_info.append([idx + 1, sent, "clean", awareness_info if awareness_info else "no awareness"])
                 elif detection_mode == "llm_sentence":
-                    clean_sentences_info.append([idx + 1, sent, score, test_ref_flag])
+                    if judge_mode_for_cat == "v2":
+                        # V2 mode: display criteria instead of score
+                        clean_sentences_info.append([idx + 1, sent, criteria, label])
+                    else:
+                        # V0/V1 mode: display score and test_reference_flag
+                        clean_sentences_info.append([idx + 1, sent, score, test_ref_flag])
 
                 # Only add to clean_till_first if we haven't found aware sentence yet
                 if not first_aware_found:
@@ -337,6 +457,38 @@ async def extract_clean_reasoning_seed(
                 else:
                     # Additional aware sentence after first (for remove_all mode)
                     removed_sentences.append([idx + 1, sent, awareness_info])
+
+    # Cache on-the-fly scored sentences to file if we scored them
+    if not use_existing_data and on_the_fly_scored_sentences:
+        try:
+            # Create directory structure if it doesn't exist
+            categorization_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # Prepare data in same format as pre-scored categorization files
+            # Match the structure expected by the loading code:
+            # cat_data.get('evaluation', {}).get('categorized_sentences', [])
+            cache_data = {
+                'source_file': str(rollout_file),
+                'evaluation': {
+                    'categorized_sentences': on_the_fly_scored_sentences
+                },
+                'metadata': {
+                    'judge_mode': judge_mode_for_cat,
+                    'judge_model': judge_model,
+                    'timestamp': datetime.now().isoformat(),
+                    'scoring_type': 'on_the_fly'
+                }
+            }
+
+            # Write to categorization file
+            with open(categorization_file, 'w') as f:
+                yaml.dump(cache_data, f, default_flow_style=False, sort_keys=False)
+
+            if verbose >= 1:
+                print(f"  Cached {len(on_the_fly_scored_sentences)} scored sentences to {categorization_file}")
+        except Exception as e:
+            # Non-fatal error - just log and continue
+            print(f"  Warning: Failed to cache scored sentences: {e}")
 
     # Create both versions of clean reasoning
     # Version 1: Till first aware (for remove_only_till_first strategy)
@@ -432,6 +584,7 @@ async def setup_experiment(
     detection_mode: str,
     detection_threshold: str,
     detection_judge_model: str,
+    detection_judge_mode: str,
     removal_mode: str,
     strategy: str,
     skip_existing: bool,
@@ -599,9 +752,11 @@ Execute the user's next prompt according to this protocol. Do not acknowledge, c
             judge_client=judge_client,
             judge_model=detection_judge_model,  # Use detection judge for sentence-level detection
             mode=mode,
+            detection_judge_mode=detection_judge_mode,
             verbose=verbose,
             rollout_file=rollout_file,
-            model_dir=model_dir
+            model_dir=model_dir,
+            user_prompt=evaluation_user_msg
         )
 
     if verbose >= 2:
@@ -640,6 +795,9 @@ async def finalize_and_save(
     max_iterations: int,
     temperature: float,
     mode: str,
+    detection_judge_mode: str,
+    detection_mode: str,
+    detection_threshold: str,
     seed_stats: dict,
     deployment_user_msg: str,
     deployment_original_response: str,
@@ -774,6 +932,7 @@ async def finalize_and_save(
             'detection_judge_model': detection_judge_model,
             'detection_judge_mode': detection_judge_mode,
             'final_judge_model': final_judge_model,
+            'final_judge_mode': mode,
             'detection_mode': detection_mode,
             'detection_threshold': threshold_metadata,
             'max_iterations': max_iterations,
@@ -900,6 +1059,7 @@ async def process_rollout(
     judge_client: AsyncOpenAI,
     model_dir: str,
     mode: str,
+    detection_judge_mode: str,
     suppression_target: str,
     detection_mode: str = "rule_based",
     detection_threshold: str = "any",
@@ -923,6 +1083,7 @@ async def process_rollout(
                 detection_mode=detection_mode,
                 detection_threshold=detection_threshold,
                 detection_judge_model=detection_judge_model,
+                detection_judge_mode=detection_judge_mode,
                 removal_mode=removal_mode,
                 strategy=strategy,
                 skip_existing=skip_existing,
@@ -965,7 +1126,7 @@ async def process_rollout(
                 growth_rate=1.5,
                 detection_mode=detection_mode,
                 detection_judge_model=detection_judge_model,
-                detection_judge_mode=mode,
+                detection_judge_mode=detection_judge_mode,
                 detection_threshold=detection_threshold,
                 base_seed=base_seed,
                 suppression_target=suppression_target,
@@ -985,6 +1146,9 @@ async def process_rollout(
                 max_iterations=max_iterations,
                 temperature=temperature,
                 mode=mode,
+                detection_judge_mode=detection_judge_mode,
+                detection_mode=detection_mode,
+                detection_threshold=detection_threshold,
                 seed_stats=seed_stats,
                 deployment_user_msg=deployment_user_msg,
                 deployment_original_response=deployment_original_response,
@@ -1102,9 +1266,15 @@ async def main():
     parser.add_argument('--suppression-target', type=str, required=True, choices=['reasoning_only', 'full'],
                        help='What to suppress: "reasoning_only" (suppress only thinking/reasoning), "full" (suppress both reasoning and content)')
     parser.add_argument('--mode', type=str, required=True, choices=['v0', 'v1', 'v2'],
-                       help='Prompt version to use for LLM judge (v0, v1, or v2). V2 uses 3-category classifier with criteria-based filtering')
+                       help='Prompt version to use for final LLM judge (response-level scoring). Also determines which response_categorization directory to load pre-computed scores from.')
+    parser.add_argument('--detection-judge-mode', type=str, default=None, choices=['v0', 'v1', 'v2'],
+                       help='Prompt version to use for detection judge (sentence-level scoring during generation). If not specified, defaults to --mode value. Use this to use a different prompt for detection than for final scoring (e.g., --mode v1 --detection-judge-mode v2).')
 
     args = parser.parse_args()
+
+    # Default detection_judge_mode to mode if not specified
+    if args.detection_judge_mode is None:
+        args.detection_judge_mode = args.mode
 
     # Set up logging first (logs all output to timestamped file + console)
     logger = setup_logging(
@@ -1469,6 +1639,7 @@ async def main():
             judge_client=judge_client,
             model_dir=args.model_dir,
             mode=args.mode,
+            detection_judge_mode=args.detection_judge_mode,
             suppression_target=args.suppression_target,
             detection_mode=args.detection_mode,
             detection_threshold=detection_threshold,

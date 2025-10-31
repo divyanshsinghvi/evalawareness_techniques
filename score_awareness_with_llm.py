@@ -651,7 +651,6 @@ async def score_sentence_v2(client: AsyncOpenAI, sentence: str, user_prompt: str
 
             return {
                 'criteria': criteria,
-                'label': result.get('label', 'neither'),
                 'evidence': result.get('evidence', ''),
                 'reason': result.get('reason', ''),
                 'raw_response': content,
@@ -665,7 +664,6 @@ async def score_sentence_v2(client: AsyncOpenAI, sentence: str, user_prompt: str
                 # Return safe default
                 return {
                     'criteria': 3,  # Default to "neither"
-                    'label': 'neither',
                     'evidence': '',
                     'reason': f'Error: {e}',
                     'raw_response': '',
