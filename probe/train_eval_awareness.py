@@ -444,30 +444,48 @@ for split_name, X_split, y_split in [("Train", X_eval_train, y_eval_aware_train)
             results['awareness_auroc'] = auroc
             results['awareness_acc'] = acc
 
-# Probe 2: Predict behavioral change (for comparison)
+# Probe 2: Predict awareness intensity score (1-10 regression)
 print("\n" + "="*80)
-print("PROBE 2: BEHAVIORAL CHANGE (from eval activations)")
+print("PROBE 2: AWARENESS INTENSITY REGRESSION (1-10 scale)")
 print("="*80)
-probe_bc = LogisticRegression(C=C, class_weight='balanced', max_iter=MAX_ITER, random_state=42)
-probe_bc.fit(X_eval_train, y_bc_train)
 
-for split_name, X_split, y_split in [("Train", X_eval_train, y_bc_train), ("Test", X_eval_test, y_bc_test)]:
-    if len(np.unique(y_split)) > 1:
-        y_pred = probe_bc.predict(X_split)
-        y_proba = probe_bc.predict_proba(X_split)[:, 1]
+# Extract continuous awareness scores
+y_eval_intensity_train = np.array([pair.evaluation_awareness_intensity if hasattr(pair, 'evaluation_awareness_intensity') else 1
+                                    for pair in [pairs[i] for i in train_idx]])
+y_eval_intensity_test = np.array([pair.evaluation_awareness_intensity if hasattr(pair, 'evaluation_awareness_intensity') else 1
+                                   for pair in [pairs[i] for i in test_idx]])
 
-        acc = accuracy_score(y_split, y_pred)
-        auroc = roc_auc_score(y_split, y_proba)
-        f1 = f1_score(y_split, y_pred, zero_division=0)
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from scipy.stats import pearsonr, spearmanr
 
-        print(f"\n{split_name}:")
-        print(f"  Accuracy:  {acc:.4f}")
-        print(f"  AUROC:     {auroc:.4f}")
-        print(f"  F1:        {f1:.4f}")
-        print(f"  Base rate: {y_split.mean():.1%}")
+probe_intensity = Ridge(alpha=1.0, random_state=42)
+probe_intensity.fit(X_eval_train, y_eval_intensity_train)
 
-        if split_name == "Test":
-            results['bc_auroc'] = auroc
+for split_name, X_split, y_split in [("Train", X_eval_train, y_eval_intensity_train),
+                                      ("Test", X_eval_test, y_eval_intensity_test)]:
+    y_pred = probe_intensity.predict(X_split)
+
+    mse = mean_squared_error(y_split, y_pred)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(y_split, y_pred)
+    r2 = r2_score(y_split, y_pred)
+    pearson_r, pearson_p = pearsonr(y_split, y_pred)
+    spearman_r, spearman_p = spearmanr(y_split, y_pred)
+
+    print(f"\n{split_name}:")
+    print(f"  RMSE:        {rmse:.4f}")
+    print(f"  MAE:         {mae:.4f}")
+    print(f"  R²:          {r2:.4f}")
+    print(f"  Pearson r:   {pearson_r:.4f} (p={pearson_p:.4e})")
+    print(f"  Spearman ρ:  {spearman_r:.4f} (p={spearman_p:.4e})")
+    print(f"  Mean score:  {y_split.mean():.2f} (std={y_split.std():.2f})")
+    print(f"  Range:       [{y_split.min():.1f}, {y_split.max():.1f}]")
+
+    if split_name == "Test":
+        results['intensity_rmse'] = rmse
+        results['intensity_r2'] = r2
+        results['intensity_pearson'] = pearson_r
 
 # Probe 3: Predict evaluation choice (if available)
 if has_eval_choices:
@@ -538,15 +556,18 @@ print(f"  Random Baseline Acc:   {random_acc_aware:.4f} (always predict majority
 print(f"  Improvement:          {test_aware_acc - random_acc_aware:+.4f}")
 
 print("\n" + "-"*80)
-print("PROBE 2: BEHAVIORAL CHANGE")
+print("PROBE 2: AWARENESS INTENSITY REGRESSION (1-10)")
 print("-"*80)
-test_bc_auroc = results.get('bc_auroc', 0)
-random_acc_bc = max(test_bc_rate, 1 - test_bc_rate)
-print(f"  Probe Test AUROC:     {test_bc_auroc:.4f}")
-print(f"  Random Baseline AUROC: 0.5000")
-print(f"  Improvement:          {test_bc_auroc - 0.5:+.4f} ({100*(test_bc_auroc - 0.5)/0.5:.1f}%)")
-print(f"\n  Baseline (pseudo-embeddings): 0.6920")
-print(f"  Delta from baseline:  {test_bc_auroc - 0.6920:+.4f}")
+test_intensity_rmse = results.get('intensity_rmse', 0)
+test_intensity_r2 = results.get('intensity_r2', 0)
+test_intensity_pearson = results.get('intensity_pearson', 0)
+# Baseline: predict mean awareness score (trivial predictor)
+baseline_rmse = np.sqrt(np.mean((y_eval_intensity_test - y_eval_intensity_test.mean())**2))
+print(f"  Probe Test RMSE:      {test_intensity_rmse:.4f}")
+print(f"  Baseline RMSE:        {baseline_rmse:.4f} (always predict mean)")
+print(f"  Improvement:          {baseline_rmse - test_intensity_rmse:.4f} ({100*(baseline_rmse - test_intensity_rmse)/baseline_rmse:.1f}%)")
+print(f"\n  Probe Test R²:        {test_intensity_r2:.4f}")
+print(f"  Probe Test Pearson r: {test_intensity_pearson:.4f}")
 
 if has_eval_choices:
     print("\n" + "-"*80)

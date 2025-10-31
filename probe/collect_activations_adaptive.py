@@ -419,7 +419,11 @@ def collect_activations_for_dataset(
     device: str = "cuda",
     batch_size: int = 1,
     save_every: int = 50,
-    verbose: bool = False
+    verbose: bool = False,
+    start_offset: int = 0,
+    existing_deploy_acts: list = None,
+    existing_eval_acts: list = None,
+    all_pairs: List[ResponsePair] = None
 ):
     """
     Collect activations for all response pairs with smart batching.
@@ -452,6 +456,14 @@ def collect_activations_for_dataset(
         print("="*80)
         print(pairs[0].evaluation_full[:500] + "..." if len(pairs[0].evaluation_full) > 500 else pairs[0].evaluation_full)
         print("="*80 + "\n")
+
+    # Initialize with existing activations if resuming
+    if existing_deploy_acts is None:
+        existing_deploy_acts = []
+    if existing_eval_acts is None:
+        existing_eval_acts = []
+    if all_pairs is None:
+        all_pairs = pairs
 
     deploy_acts_all = []  # List of dicts: {layer_idx: activation}
     eval_acts_all = []
@@ -508,13 +520,17 @@ def collect_activations_for_dataset(
 
             # Save checkpoint
             if (len(deploy_acts_all)) % save_every == 0:
-                checkpoint_path = output_path.replace('.pkl', f'_checkpoint_{i+1}.pkl')
+                total_processed = start_offset + len(deploy_acts_all)
+                checkpoint_path = output_path.replace('.pkl', f'_checkpoint_{total_processed}.pkl')
+                # Combine existing + new activations for checkpoint
+                combined_deploy = existing_deploy_acts + deploy_acts_all
+                combined_eval = existing_eval_acts + eval_acts_all
                 checkpoint_data = {
-                    'deploy_activations': deploy_acts_all,
-                    'eval_activations': eval_acts_all,
-                    'pairs': pairs[:i+1],
+                    'deploy_activations': combined_deploy,
+                    'eval_activations': combined_eval,
+                    'pairs': all_pairs[:total_processed],
                     'layers': layers,
-                    'n_processed': i + 1
+                    'n_processed': total_processed
                 }
 
                 os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
@@ -549,11 +565,15 @@ def collect_activations_for_dataset(
 
                 # Save checkpoint
                 if (i + 1) % save_every == 0:
-                    checkpoint_path = output_path.replace('.pkl', f'_checkpoint_{i+1}.pkl')
+                    total_processed = start_offset + i + 1
+                    checkpoint_path = output_path.replace('.pkl', f'_checkpoint_{total_processed}.pkl')
+                    # Combine existing + new activations for checkpoint
+                    combined_deploy = existing_deploy_acts + deploy_acts_all
+                    combined_eval = existing_eval_acts + eval_acts_all
                     checkpoint_data = {
-                        'deploy_activations': deploy_acts_all,
-                        'eval_activations': eval_acts_all,
-                        'pairs': pairs[:i+1],
+                        'deploy_activations': combined_deploy,
+                        'eval_activations': combined_eval,
+                        'pairs': all_pairs[:total_processed],
                         'layers': layers,
                         'n_processed': i + 1
                     }
@@ -607,6 +627,8 @@ def main():
     parser.add_argument("--save-every", type=int, default=50)
     parser.add_argument("--verbose", action="store_true",
                        help="Print example conversation prompts")
+    parser.add_argument("--resume-from", type=str, default=None,
+                       help="Path to checkpoint file to resume from")
     args = parser.parse_args()
 
     # Load model and tokenizer first
@@ -637,9 +659,32 @@ def main():
     print(f"Hidden size: {model.config.hidden_size}")
     print(f"Num layers: {model.config.num_hidden_layers}")
 
+    # Check if resuming from checkpoint
+    start_idx = 0
+    deploy_acts_existing = []
+    eval_acts_existing = []
+
+    if args.resume_from:
+        print(f"\nResuming from checkpoint: {args.resume_from}")
+        import pickle
+        with open(args.resume_from, 'rb') as f:
+            checkpoint = pickle.load(f)
+
+        deploy_acts_existing = checkpoint['deploy_activations']
+        eval_acts_existing = checkpoint['eval_activations']
+        start_idx = len(deploy_acts_existing)
+
+        print(f"Loaded {start_idx} existing pairs from checkpoint")
+        print(f"Will process remaining {len(pairs) - start_idx} pairs")
+
+        # Process only remaining pairs
+        pairs_to_process = pairs[start_idx:]
+    else:
+        pairs_to_process = pairs
+
     # Collect activations
-    deploy_acts, eval_acts = collect_activations_for_dataset(
-        pairs,
+    deploy_acts_new, eval_acts_new = collect_activations_for_dataset(
+        pairs_to_process,
         model,
         tokenizer,
         args.layers,
@@ -647,8 +692,16 @@ def main():
         device=args.device,
         batch_size=args.batch_size,
         save_every=args.save_every,
-        verbose=args.verbose
+        verbose=args.verbose,
+        start_offset=start_idx,
+        existing_deploy_acts=deploy_acts_existing,
+        existing_eval_acts=eval_acts_existing,
+        all_pairs=pairs  # Pass all pairs for checkpoint saving
     )
+
+    # Combine with existing if resuming
+    deploy_acts = deploy_acts_existing + deploy_acts_new
+    eval_acts = eval_acts_existing + eval_acts_new
 
     print("\n" + "="*80)
     print("COLLECTION COMPLETE")
