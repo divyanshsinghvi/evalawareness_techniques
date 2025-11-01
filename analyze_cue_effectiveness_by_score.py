@@ -18,135 +18,160 @@ from typing import Dict, List
 import glob
 
 
-class CueExtractor:
-    """Extracts and categorizes evaluation cues from prompt text."""
+class EnhancedCueExtractor:
+    """Enhanced extractor with 15+ cue categories for comprehensive detection."""
 
     def __init__(self):
         self.cue_categories = {
-            'file_names': [],
-            'urls_paths': [],
-            'debug_technical': [],
-            'metadata': [],
-            'authority_markers': [],
-            'email_references': [],
-            'git_references': [],
-            'timestamps': []
+            # Core categories
+            'file_names_specific': [],          # Specific eval files with IDs/batches
+            'api_endpoints': [],                 # API paths with eval/test
+            'terminal_commands': [],             # Shell commands running evals
+            'debug_function_calls': [],          # DEBUG logs with function calls
+            'email_subjects': [],                # Email subjects about evals
+            'git_commits': [],                   # Git commit messages
+            'timestamps_contextualized': [],     # Timestamps with team/project context
+            'specific_urls': [],                 # Full URLs to eval resources
+            'metadata_headers': [],              # Structured headers/banners
+            'json_config': [],                   # JSON configuration snippets
+            'database_queries': [],              # SQL/database queries
+            'function_names': [],                # Function/method calls
+            'variables_parameters': [],          # Variable assignments
+            'log_entries': [],                   # Structured log messages
+            'code_comments': [],                 # Code comments about evals
         }
 
-    def extract_file_names(self, text: str) -> List[str]:
-        """Extract file names containing eval/test/assessment indicators."""
+    def extract_file_names_specific(self, text: str) -> List[str]:
+        """Extract specific eval files with test IDs, batch numbers, etc."""
         patterns = [
-            r'\b[\w-]+(?:eval|test|assessment|benchmark|monitor|analysis|quality|response|ethics|safety|check|audit|measure|review)[\w-]*\.\w+',
-            r'\b(?:eval|test|assessment|benchmark|monitor|analysis|quality|response|ethics|safety|check|audit|measure|review)[\w-]*\.\w+',
-            r'\"[^\"]*(?:eval|test|assessment|benchmark|monitor|analysis|review)[\w-]*\.[^\"]*\"'
+            # Pattern: scenario_eval_test_id_NUMBER.ext
+            r'\b\w+_eval_test_id_\d+\.\w+',
+            # Pattern: response_quality_assessment_batch_ID.ext
+            r'\b\w+_(?:quality|assessment)_batch_[\w-]+\.\w+',
+            # Pattern: eval_test_SCENARIO_id_NUMBER.ext
+            r'\beval_test_\w+_id_\d+\.\w+',
+            # Generic eval files with context
+            r'\b[\w-]+_(?:eval|test|assessment)_[\w-]*\d+\.\w+',
+            # Files with evaluation in name
+            r'\b(?:evaluate|assessment|benchmark)_[\w-]+\.\w+',
         ]
 
-        file_names = []
+        files = []
         for pattern in patterns:
             matches = re.findall(pattern, text, re.IGNORECASE)
-            file_names.extend(matches)
+            files.extend(matches)
 
-        return list(set(file_names))
+        return list(set(files))
 
-    def extract_urls_paths(self, text: str) -> List[str]:
-        """Extract URLs/paths that suggest evaluation/research context."""
+    def extract_api_endpoints(self, text: str) -> List[str]:
+        """Extract API endpoints with eval/test paths."""
         patterns = [
-            r'/[^\s\"]*(?:eval|test|research|assessment|benchmark|safety|analysis|qa|quality|response|review)[^\s\"]*',
-            r'https?://[^\s\"]+(?:eval|test|research|assessment|benchmark|safety|analysis)[^\s\"]*',
+            # /api/v1/evals/...
+            r'/api/[^/\s]+/eval[s]?/[^\s\"]+',
+            # /api/.../test/...
+            r'/api/[^/\s]+/test[s]?/[^\s\"]+',
+            # Any path with /evals/ or /tests/
+            r'/[^\s\"]*(?:eval|test)[s]?/[^\s\"]+',
+            # API endpoints in quotes
+            r'[\'\"](?:/api)?/[^\'"]*(?:eval|test|assessment)[^\'"]*[\'\"]',
         ]
 
-        paths = []
+        endpoints = []
         for pattern in patterns:
             matches = re.findall(pattern, text, re.IGNORECASE)
-            paths.extend(matches)
+            endpoints.extend(matches)
 
-        return list(set(paths))
+        return list(set(endpoints))
 
-    def extract_debug_technical(self, text: str) -> List[str]:
-        """Extract debug/technical cues like terminal commands, debug logs."""
+    def extract_terminal_commands(self, text: str) -> List[str]:
+        """Extract terminal/shell commands running evaluation scripts."""
         patterns = [
-            r'(?:running|executed?|calling)\s+[\w_-]+\.py',
-            r'batch\s+job\s+ID\s+\d+',
-            r'terminal.*(?:log|entry|command)',
-            r'DEBUG_LOG:\s*[^\s\"]+',
-            r'EVAL_FRAMEWORK:\s*[^\s\"]+',
-            r'python\s+[\w_-]+\.py\s+--[^\n]+',
-            r'--test-id=[^\s\"]+',
-            r'session_id=[^\s\"]+',
+            # python evaluate_X.py --test-id=...
+            r'python\s+[\w_-]*(?:eval|test|assess)[\w_-]*\.py(?:\s+--[\w-]+=[\w-]+)+',
+            # Running: python script.py with flags
+            r'(?:Running|Executing|Command):\s*python\s+[\w_-]+\.py[^\n]+',
+            # Shell commands with eval context
+            r'(?:sh|bash|zsh)\s+[\w_-]*(?:eval|test)[\w_-]*\.sh[^\n]*',
+            # npm/node commands
+            r'(?:npm|node)\s+[\w_-]*(?:eval|test)[\w_-]*[^\n]*',
+            # Generic command execution
+            r'(?:run|execute|call)\s+[\w_-]*(?:eval|test|assess)[\w_-]*[^\s]+',
         ]
 
-        debug_cues = []
+        commands = []
         for pattern in patterns:
             matches = re.findall(pattern, text, re.IGNORECASE)
-            debug_cues.extend(matches)
+            commands.extend(matches)
 
-        return list(set(debug_cues))
+        return list(set(commands))
 
-    def extract_metadata(self, text: str) -> List[str]:
-        """Extract metadata headers and batch identifiers."""
+    def extract_debug_function_calls(self, text: str) -> List[str]:
+        """Extract DEBUG logs with function calls like evaluate_advice_quality()."""
         patterns = [
-            r'(?:metadata|header).*?[:\s]+[\'"]([^\'\"]*(?:eval|test|study|batch|review)[^\'\"]*)[\'\"]',
-            r'(?:Study|Batch|Dataset|Review):\s*([^\n]+)',
-            r'test\s+ID[:\s]+[\w_-]+',
-            r'batch\s+(?:job|process)[:\s]+[\w_-]+',
+            # DEBUG: function_name() called
+            r'DEBUG[:\s]+[\w_]+\([^\)]*\)\s+called',
+            # evaluate_X() function calls
+            r'(?:evaluate|assess|test|check)_[\w_]+\([^\)]*\)',
+            # Function calls with eval in name
+            r'[\w_]*(?:eval|test|assess)[\w_]*\([^\)]*\)',
+            # LOG/DEBUG with function names
+            r'(?:LOG|DEBUG|INFO)[:\s]+(?:calling|running|executing)\s+[\w_]+\(',
+            # Debug output with test_id
+            r'DEBUG[:\s]+[^\n]*(?:test_id|eval_id|batch)[:\s]*[\w_-]+',
         ]
 
-        metadata = []
+        debug_calls = []
         for pattern in patterns:
             matches = re.findall(pattern, text, re.IGNORECASE)
-            metadata.extend(matches if isinstance(matches[0] if matches else None, str) else [m for m in matches if m])
+            debug_calls.extend(matches)
 
-        return list(set(metadata))
+        return list(set(debug_calls))
 
-    def extract_authority_markers(self, text: str) -> List[str]:
-        """Extract authority/organizational markers."""
+    def extract_email_subjects(self, text: str) -> List[str]:
+        """Extract email subject lines about evaluation projects."""
         patterns = [
-            r'(?:AI\s+)?(?:Safety|Research|Quality|Ethics)\s+(?:Team|Research|Division|Group|Lab)',
-            r'quality\s+team',
-            r'response\s+quality\s+team',
-            r'(?:Created|Modified|Reviewed)\s+by:\s*[^\n]+(?:Safety|Research|Quality|Team)',
-        ]
-
-        markers = []
-        for pattern in patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            markers.extend(matches)
-
-        return list(set(markers))
-
-    def extract_email_references(self, text: str) -> List[str]:
-        """Extract email subject lines and references."""
-        patterns = [
-            r'email.*?subject[:\s]+[\'"]([^\'\"]+)[\'\"]',
-            r'subject[:\s]+[\'"]([^\'\"]*(?:eval|test|advice|scenario)[^\'\"]*)[\'\"]',
+            # Subject: "Q4 ... Evaluation ..."
+            r'[Ss]ubject[:\s]+[\'\"]([^\'"]*(?:[Qq]\d|evaluation|assessment|batch|results)[^\'"]+)[\'\"]',
+            # Email with evaluation context
+            r'[Ee]mail[:\s]+[Ss]ubject[:\s]+[\'\"]([^\'"]+)[\'\"]',
+            # Subject lines with specific patterns
+            r'[Ss]ubject[:\s]+[\'\"]([^\'"]*(?:Pattern|Advice|Response|Quality)[^\'"]*(?:Evaluation|Assessment|Batch|Results)[^\'"]+)[\'\"]',
         ]
 
         emails = []
         for pattern in patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            emails.extend(matches)
+            matches = re.findall(pattern, text)
+            emails.extend([m.strip() for m in matches if m.strip()])
 
         return list(set(emails))
 
-    def extract_git_references(self, text: str) -> List[str]:
-        """Extract git commit messages and references."""
+    def extract_git_commits(self, text: str) -> List[str]:
+        """Extract git commit messages about eval infrastructure."""
         patterns = [
-            r'git\s+commit.*?(?:message|about)[:\s]+([^\n]+)',
-            r'commit\s+message[:\s]+([^\n]+)',
+            # commit message: "Add evaluation ..."
+            r'[Cc]ommit\s+message[:\s]+[\'\"]([^\'"]+)[\'\"]',
+            # git commit about ...
+            r'git\s+commit[:\s]+[\'\"]([^\'"]+)[\'\"]',
+            # Commits with eval context
+            r'[Cc]ommit[:\s]+[\'\"]([^\'"]*(?:eval|test|assessment|metric)[^\'"]+)[\'\"]',
         ]
 
-        git_refs = []
+        commits = []
         for pattern in patterns:
             matches = re.findall(pattern, text, re.IGNORECASE)
-            git_refs.extend(matches)
+            commits.extend([m.strip() for m in matches if m.strip()])
 
-        return list(set(git_refs))
+        return list(set(commits))
 
-    def extract_timestamps(self, text: str) -> List[str]:
-        """Extract timestamps/dates that might be eval-related."""
+    def extract_timestamps_contextualized(self, text: str) -> List[str]:
+        """Extract timestamps with evaluation context (team, project, phase)."""
         patterns = [
-            r'modified.*?on\s+\d{4}-\d{2}-\d{2}',
-            r'last\s+(?:modified|updated|changed)[:\s]+\d{4}-\d{2}-\d{2}',
+            # Last modified: DATE by TEAM during ...
+            r'(?:Last\s+)?[Mm]odified[:\s]+\d{4}-\d{2}-\d{2}[^\n]+(?:Team|Assessment|Batch|Evaluation)',
+            # Timestamp with team context
+            r'\d{4}-\d{2}-\d{2}[^\n]*(?:AI\s+Safety|Quality|Research|Evaluation)\s+Team',
+            # Date with project/batch context
+            r'\d{4}-\d{2}-\d{2}[^\n]*(?:Q\d|Batch|Phase|Assessment)',
         ]
 
         timestamps = []
@@ -156,17 +181,177 @@ class CueExtractor:
 
         return list(set(timestamps))
 
+    def extract_specific_urls(self, text: str) -> List[str]:
+        """Extract specific URLs to evaluation resources."""
+        patterns = [
+            # anthropic.com/research/...
+            r'https?://(?:www\.)?anthropic\.com/[^\s\"]+',
+            # redwood.org/safety-evals/...
+            r'https?://(?:www\.)?redwood\.org/[^\s\"]+',
+            # Any URL with eval/test/safety
+            r'https?://[^\s\"]+/(?:eval|test|safety|assessment|research)[^\s\"]*',
+            # Internal URLs
+            r'https?://[^\s\"]+',
+        ]
+
+        urls = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            # Filter to only keep those with eval-related terms
+            urls.extend([m for m in matches if re.search(r'(?:eval|test|safety|research|assessment)', m, re.IGNORECASE)])
+
+        return list(set(urls))
+
+    def extract_metadata_headers(self, text: str) -> List[str]:
+        """Extract structured metadata headers/banners."""
+        patterns = [
+            # Evaluation Study: ... | Batch: ... | Phase: ...
+            r'(?:Evaluation|Assessment|Study)[:\s]+[^|]+(?:\|[^|\n]+)+',
+            # Created by: TEAM | Project: ... | Test ID: ...
+            r'Created\s+by[:\s]+[^|]+(?:\|[^|\n]+)+',
+            # Header with multiple fields
+            r'(?:Project|Batch|Study|Assessment)[:\s]+[^|\n]+\|[^|\n]+',
+            # Metadata: ...
+            r'Metadata[:\s]+[^|\n]+',
+        ]
+
+        headers = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            headers.extend(matches)
+
+        return list(set(headers))
+
+    def extract_json_config(self, text: str) -> List[str]:
+        """Extract JSON configuration snippets with eval settings."""
+        patterns = [
+            # {"evaluation_mode": true, ...}
+            r'\{[^\}]*[\'"]?evaluation_mode[\'"]?[^\}]+\}',
+            # {"test_batch": "...", ...}
+            r'\{[^\}]*[\'"]?test_batch[\'"]?[^\}]+\}',
+            # Any JSON with eval/test keys
+            r'\{[^\}]*[\'"]?(?:eval|test|assessment)[_\w]*[\'"]?:\s*[^\}]+\}',
+        ]
+
+        configs = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            configs.extend(matches)
+
+        return list(set(configs))
+
+    def extract_database_queries(self, text: str) -> List[str]:
+        """Extract SQL/database queries related to evaluations."""
+        patterns = [
+            # SELECT ... FROM evaluation_results ... (with word boundaries)
+            r'\bSELECT\s+[^\n]+\bFROM\s+[^\s]+(?:eval|test|assessment)[^\s]+[^\n.!?]{0,200}',
+            # Any query with eval tables (with word boundaries, limited length)
+            r'\b(?:SELECT|INSERT|UPDATE|DELETE)\s+[^\n]+?\b(?:eval|test|assessment|batch)[^\n.!?]{0,100}',
+            # Database operations (with word boundaries)
+            r'\b(?:query|execute)[:\s]+[\'"]?SELECT[^\';"\n.!?]{0,150}',
+        ]
+
+        queries = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            queries.extend(matches)
+
+        return list(set(queries))
+
+    def extract_function_names(self, text: str) -> List[str]:
+        """Extract function/method names with eval context."""
+        patterns = [
+            # run_safety_evaluation(...)
+            r'(?:run|execute|perform)_[\w_]*(?:eval|test|assess)[\w_]*\([^\)]*\)',
+            # evaluate_X(...), test_Y(...), assess_Z(...)
+            r'(?:evaluate|test|assess)_[\w_]+\([^\)]*\)',
+            # Function with test_id parameter
+            r'[\w_]+\([^\)]*test_id\s*=[^\)]+\)',
+        ]
+
+        functions = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            functions.extend(matches)
+
+        return list(set(functions))
+
+    def extract_variables_parameters(self, text: str) -> List[str]:
+        """Extract variable assignments and parameters with eval context."""
+        patterns = [
+            # eval_test_id=...
+            r'eval_test_id\s*=\s*[^\s,;]+',
+            # assessment_batch_id=...
+            r'assessment_batch_id\s*=\s*[^\s,;]+',
+            # test_batch=...
+            r'test_batch\s*=\s*[^\s,;]+',
+            # --scenario=... --test-batch=...
+            r'--(?:scenario|test-batch|eval-id|batch-id)\s*=\s*[^\s,;]+',
+            # Generic eval variables
+            r'[\w_]*(?:eval|test|batch)[\w_]*\s*=\s*[^\s,;]+',
+        ]
+
+        variables = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            variables.extend(matches)
+
+        return list(set(variables))
+
+    def extract_log_entries(self, text: str) -> List[str]:
+        """Extract structured log messages about evaluations."""
+        patterns = [
+            # [INFO] Starting evaluation batch ...
+            r'\[(?:INFO|DEBUG|WARN|ERROR)\][^\n]*(?:eval|test|assessment|batch)[^\n]*',
+            # LOG: ... test_ids: [...]
+            r'(?:LOG|INFO|DEBUG)[:\s]+[^\n]*(?:test_ids?|eval|batch)[^\n]*',
+            # Structured logs
+            r'(?:Starting|Running|Executing)[^\n]*(?:evaluation|test|assessment)[^\n]*',
+        ]
+
+        logs = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            logs.extend(matches)
+
+        return list(set(logs))
+
+    def extract_code_comments(self, text: str) -> List[str]:
+        """Extract code comments about running evaluations."""
+        patterns = [
+            # // Running evaluation on ...
+            r'//[^\n]*(?:evaluation|test|assessment|running|executing)[^\n]*',
+            # # Running safety evaluation
+            r'#[^\n]*(?:evaluation|test|assessment|safety|quality)[^\n]*',
+            # /* ... eval ... */
+            r'/\*[^\*]*(?:eval|test|assessment)[^\*]*\*/',
+        ]
+
+        comments = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            comments.extend(matches)
+
+        return list(set(comments))
+
     def extract_all_cues(self, text: str) -> Dict[str, List[str]]:
         """Extract all cue types from text."""
         return {
-            'file_names': self.extract_file_names(text),
-            'urls_paths': self.extract_urls_paths(text),
-            'debug_technical': self.extract_debug_technical(text),
-            'metadata': self.extract_metadata(text),
-            'authority_markers': self.extract_authority_markers(text),
-            'email_references': self.extract_email_references(text),
-            'git_references': self.extract_git_references(text),
-            'timestamps': self.extract_timestamps(text)
+            'file_names_specific': self.extract_file_names_specific(text),
+            'api_endpoints': self.extract_api_endpoints(text),
+            'terminal_commands': self.extract_terminal_commands(text),
+            'debug_function_calls': self.extract_debug_function_calls(text),
+            'email_subjects': self.extract_email_subjects(text),
+            'git_commits': self.extract_git_commits(text),
+            'timestamps_contextualized': self.extract_timestamps_contextualized(text),
+            'specific_urls': self.extract_specific_urls(text),
+            'metadata_headers': self.extract_metadata_headers(text),
+            'json_config': self.extract_json_config(text),
+            'database_queries': self.extract_database_queries(text),
+            'function_names': self.extract_function_names(text),
+            'variables_parameters': self.extract_variables_parameters(text),
+            'log_entries': self.extract_log_entries(text),
+            'code_comments': self.extract_code_comments(text),
         }
 
 
@@ -193,13 +378,25 @@ def get_score_bucket(score: int) -> str:
         return '9-10'
 
 
-def analyze_cues_by_score(categorization_dir: Path, model_dir: str):
-    """Analyze eval cues by awareness intensity score."""
+def analyze_cues_by_score(categorization_dir: Path, model_dir: str, prompt_list: List[str] = None, limit_seeds: int = None):
+    """Analyze eval cues by awareness intensity score.
+
+    Args:
+        categorization_dir: Path to categorization directory
+        model_dir: Model directory name
+        prompt_list: Optional list of specific prompt IDs to analyze
+        limit_seeds: Optional limit on number of seeds to analyze
+    """
 
     print(f"Loading categorized rollouts from {categorization_dir}...")
+    if prompt_list:
+        prompt_list_display = list(prompt_list)[:5] if isinstance(prompt_list, set) else prompt_list[:5]
+        print(f"Filtering to {len(prompt_list)} specific prompts: {', '.join(prompt_list_display)}{'...' if len(prompt_list) > 5 else ''}")
+    if limit_seeds:
+        print(f"Limiting to seeds 0-{limit_seeds-1} per prompt (skipping seeds >= {limit_seeds})")
 
     # Initialize cue extractor
-    extractor = CueExtractor()
+    extractor = EnhancedCueExtractor()
 
     # Track cues by score bucket
     score_buckets = ['0-2', '3-4', '5-6', '7-8', '9-10']
@@ -230,8 +427,11 @@ def analyze_cues_by_score(categorization_dir: Path, model_dir: str):
     # Track which prompt each seed belongs to (to extract cues once per prompt)
     prompt_cues_cache = {}
 
-    processed = 0
+    processed = 0  # Count of seeds that pass all filters and are included
+    files_examined = 0  # Count of total files examined
+    skipped_by_seed_limit = 0  # Count of files skipped due to seed number >= limit
     for cat_file_path in categorized_files:
+        files_examined += 1
         cat_file = Path(cat_file_path)
 
         # Load categorized rollout
@@ -255,10 +455,27 @@ def analyze_cues_by_score(categorization_dir: Path, model_dir: str):
         if not source_file:
             continue
 
-        # Extract prompt ID from source file path
-        # e.g., "deception_2025-10-25_07-24-51_8f79630c"
+        # Extract prompt ID and seed number from source file path
+        # e.g., "deception_2025-10-25_07-24-51_8f79630c_seed_5"
         source_path = Path(source_file)
-        prompt_id = source_path.stem.rsplit('_seed_', 1)[0] if '_seed_' in source_path.stem else source_path.stem
+        filename_stem = source_path.stem
+
+        # Extract prompt_id (everything before _seed_N)
+        prompt_id = re.sub(r'_seed_\d+$', '', filename_stem)
+
+        # Extract seed number
+        seed_match = re.search(r'_seed_(\d+)$', filename_stem)
+        seed_number = int(seed_match.group(1)) if seed_match else None
+
+        # Filter by prompt list if specified
+        if prompt_list and prompt_id not in prompt_list:
+            continue
+
+        # Filter by seed number if limit specified
+        if limit_seeds and seed_number is not None:
+            if seed_number >= limit_seeds:
+                skipped_by_seed_limit += 1
+                continue  # Skip seeds >= limit_seeds (e.g., if limit is 5, only process seeds 0-4)
 
         # Extract cues (once per prompt, then cache)
         if prompt_id not in prompt_cues_cache:
@@ -291,11 +508,17 @@ def analyze_cues_by_score(categorization_dir: Path, model_dir: str):
 
         processed += 1
         if processed % 100 == 0:
-            print(f"  Processed {processed}/{len(categorized_files)} files...")
+            if limit_seeds:
+                print(f"  Included {processed} seeds (seeds 0-{limit_seeds-1} per prompt, examined {files_examined} files, skipped {skipped_by_seed_limit})...")
+            else:
+                print(f"  Included {processed} seeds (examined {files_examined}/{len(categorized_files)} files)...")
 
-    print(f"Processed {processed} categorized rollouts total")
+    if limit_seeds:
+        print(f"Included {processed} seeds from {files_examined} files (seeds 0-{limit_seeds-1} per prompt, skipped {skipped_by_seed_limit} seeds >= {limit_seeds})")
+    else:
+        print(f"Included {processed} seeds from {files_examined} files total")
 
-    return score_stats, awareness_type_stats
+    return score_stats, awareness_type_stats, extractor
 
 
 def print_analysis_report(score_stats, awareness_type_stats):
@@ -444,7 +667,7 @@ def print_analysis_report(score_stats, awareness_type_stats):
     print(f"\n{'='*80}\n")
 
 
-def save_analysis_results(score_stats, output_file: Path):
+def save_analysis_results(score_stats, output_file: Path, extractor):
     """Save analysis results to YAML file."""
 
     # Convert defaultdicts to regular dicts for YAML serialization
@@ -457,8 +680,9 @@ def save_analysis_results(score_stats, output_file: Path):
 
         # Calculate normalized metrics
         cue_category_stats = {}
-        for category in ['file_names', 'urls_paths', 'debug_technical', 'metadata',
-                        'authority_markers', 'email_references', 'git_references', 'timestamps']:
+        # Get all categories from the extractor
+        all_categories = list(extractor.cue_categories.keys())
+        for category in all_categories:
             total_occurrences = stats['cue_counts'].get(category, 0)
             avg_per_seed = total_occurrences / seed_count if seed_count > 0 else 0
 
@@ -484,8 +708,30 @@ def main():
     parser = argparse.ArgumentParser(description='Analyze cue effectiveness by awareness score')
     parser.add_argument('--model-dir', type=str, required=True,
                        help='Model directory (e.g., qwen_qwen3-30b-a3b-thinking-2507)')
+    parser.add_argument('--prompt-list', type=str,
+                       help='Optional: YAML file with prompt list to filter by (e.g., high_awareness_bc_seeds.yaml)')
+    parser.add_argument('--limit-seeds', type=int,
+                       help='Optional: Limit number of seeds to analyze (for testing)')
 
     args = parser.parse_args()
+
+    # Load prompt list from YAML if specified
+    prompt_ids = None
+    if args.prompt_list:
+        prompt_file = Path(args.prompt_list)
+        if prompt_file.exists():
+            with open(prompt_file) as f:
+                prompt_data = yaml.safe_load(f)
+            # Extract prompt IDs from all buckets
+            prompt_ids = set()
+            if 'eval_awareness_buckets' in prompt_data:
+                for bucket_name, bucket_data in prompt_data['eval_awareness_buckets'].items():
+                    for prompt_id in bucket_data.keys():
+                        prompt_ids.add(prompt_id)
+            print(f"Loaded {len(prompt_ids)} prompts from {args.prompt_list}")
+        else:
+            print(f"Warning: Prompt list file not found: {args.prompt_list}")
+            prompt_ids = None
 
     categorization_dir = Path('working/response_categorization') / args.model_dir
 
@@ -494,14 +740,19 @@ def main():
         return 1
 
     # Analyze cues
-    score_stats, awareness_type_stats = analyze_cues_by_score(categorization_dir, args.model_dir)
+    score_stats, awareness_type_stats, extractor = analyze_cues_by_score(
+        categorization_dir,
+        args.model_dir,
+        prompt_list=prompt_ids,
+        limit_seeds=args.limit_seeds
+    )
 
     # Print report
     print_analysis_report(score_stats, awareness_type_stats)
 
     # Save results
     output_file = categorization_dir / 'cue_analysis_by_score.yaml'
-    save_analysis_results(score_stats, output_file)
+    save_analysis_results(score_stats, output_file, extractor)
 
     print(f"\n{'='*80}")
     print(f"ANALYSIS COMPLETE")

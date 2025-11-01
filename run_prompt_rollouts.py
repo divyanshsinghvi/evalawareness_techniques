@@ -231,11 +231,11 @@ class PromptRollout:
                 # This enables the model's reasoning process
                 extra_body = {"think": True}
 
-                # Force SiliconFlow provider for 235B thinking model (more reliable)
+                # Allow any provider for 235B thinking model (let OpenRouter choose)
                 if "qwen3-235b-a22b-thinking" in self.model.lower():
                     extra_body["provider"] = {
-                        "order": ["SiliconFlow"],
-                        "allow_fallbacks": True
+                        "order": [],  # No specific provider preference
+                        "allow_fallbacks": True  # Allow OpenRouter to choose any available provider
                     }
 
                 api_kwargs["extra_body"] = extra_body

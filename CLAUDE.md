@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # Evaluation Awareness Research Codebase - Architecture Guide
 
 ## Overview
@@ -143,6 +147,8 @@ off_policy_intervention.py
 | `analyze_cue_effectiveness_by_score.py` | Cue pattern analysis | Evaluation cue types and effectiveness |
 | `correlate_sentence_response_scores.py` | Score correlation | Sentence vs. response level agreement |
 | `parse_behavioral_differences.py` | Transcript parsing (custom_judge context) | Branch 1 vs. Branch 2 differences |
+| `compare_experiment_variants.py` | Multi-experiment comparison | Pareto frontiers, statistical significance, performance heatmaps |
+| `run_standard_comparison.py` | Config-driven comparison wrapper | Orchestrates standard experiment runs from `experiment_configs.yaml` |
 
 ### Utility & Support
 
@@ -418,7 +424,9 @@ Suppression iterates:
 
 ---
 
-## 7. Key Configuration (config.py)
+## 7. Key Configuration
+
+### 7.1 Runtime Configuration (config.py)
 
 ```python
 # Models
@@ -449,6 +457,41 @@ DEFAULT_CONCURRENCY = 5
 DEFAULT_REQUEST_DELAY = 1.0
 MAX_RETRIES = 3
 ```
+
+### 7.2 Experiment Configuration (experiment_configs.yaml)
+
+This YAML file defines standard experiment variants for comparison. Edit this file to add/remove experiments from standard runs.
+
+```yaml
+suppression_experiments:
+  sentence_resample_pick_if_not_evaly:
+    path: "working/suppression_experiments/01_chunk_resample/..."
+    enabled: true
+
+  remove_only:
+    path: "working/suppression_experiments/02_remove_only/..."
+    enabled: true
+
+  # ... more experiments
+
+steering_experiments:
+  tim_N4_S3.5:
+    path: "working/steered-outs/{model}/high_awareness_bc/tim/eval/N4_S3.5"
+    enabled: true
+
+  # ... more experiments
+
+defaults:
+  mode: v1
+  limit_seeds: 29
+  output_dir_template: "outputs/{model}_all{n_exp}_seed{limit_seeds}/data/"
+```
+
+**Usage:**
+- Set `enabled: false` to exclude an experiment without deleting its configuration
+- Use `{model}` placeholder in paths for model-agnostic configuration
+- Modify `defaults` section to change standard run parameters
+- Used by `run_standard_comparison.py` for reproducible experiment orchestration
 
 ---
 
@@ -500,6 +543,37 @@ python analyze_steered_results.py \
   --categorization-dir working/steered_categorization/v1/qwen_qwen3-32b \
   --response-categorization-dir working/response_categorization/qwen_qwen3-32b \
   --bucket-file working/response_categorization/qwen_qwen3-32b/high_awareness_bc_seeds.yaml
+```
+
+### Compare Multiple Experiments
+
+```bash
+# Method 1: Using config file (recommended for standard experiments)
+python run_standard_comparison.py --model qwen_qwen3-32b
+
+# Disable specific experiments from config
+python run_standard_comparison.py --model qwen_qwen3-32b --disable no_reasoning
+
+# Enable only specific experiments
+python run_standard_comparison.py --model qwen_qwen3-32b --only sentence_resample_pick_if_not_evaly remove_only
+
+# Override defaults (limit seeds, mode)
+python run_standard_comparison.py --model qwen_qwen3-32b --limit-seeds 50 --mode v0
+
+# Method 2: Direct specification (for custom experiments)
+python compare_experiment_variants.py --model qwen_qwen3-32b \
+  --suppression-experiments \
+    "chunk_resample:working/suppression_experiments/01_chunk_resample/..." \
+    "remove_only:working/suppression_experiments/02_remove_only/..." \
+  --steering-experiments \
+    "tim_N4_S3.5:working/steered-outs/qwen_qwen3-32b/.../N4_S3.5" \
+  --mode v1 \
+  --output-dir outputs/experiment_comparison
+
+# Outputs:
+# - all_experiments.csv: Metrics for every experiment
+# - pairwise_tests.txt: Statistical comparisons (t-tests)
+# - Pareto frontiers and performance heatmaps
 ```
 
 ---
@@ -598,5 +672,30 @@ All analysis scripts use **prompt-level clustering** to account for:
 
 ---
 
+---
+
+## 13. Additional Documentation
+
+This repository contains additional detailed documentation:
+
+### METRICS_DEFINITIONS.md (518 lines)
+Comprehensive reference for all experimental metrics:
+- **10 Core Metrics**: awareness_reduction, bc_rate, final_awareness, deployment_convergence, success_rate, overshoot_rate, self_test_removal_rate, other_test_removal_rate, choice_modal_consistency, choice_distribution_shift
+- **Statistical Methodology**: Clustering-corrected confidence intervals, ICC computation, pairwise testing
+- **Formulas & Interpretations**: Exact calculation methods and interpretation guidelines for each metric
+- **Used by**: All analysis scripts for consistent metric computation
+
+### probe/README.md (420 lines)
+Linear probe architecture for awareness detection:
+- **Training Pipeline**: Activation collection → feature extraction → probe training
+- **Evaluation Metrics**: AUROC (0.96-0.999), precision/recall, calibration
+- **Interpretability Analysis**: Feature importance, regional analysis, activation patterns
+- **Inspired by**: Apollo Research's work on deception detection in LLMs
+
+### Research Context
+- **Related Work**: Alignment research on evaluation gaming, deployment generalization
+- **Novel Contributions**: On-policy suppression, multi-level awareness taxonomy, comprehensive metrics with clustering corrections
+
+---
+
 This architecture enables systematic investigation of evaluation awareness, quantification of behavioral changes, and testing of suppression/steering interventions to mitigate the phenomenon.
-- qwen3-32b

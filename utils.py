@@ -6,7 +6,8 @@ Shared utility functions for the derisk project.
 import re
 import logging
 import sys
-from typing import List, Dict, Tuple
+import yaml
+from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
@@ -325,3 +326,237 @@ def analyze_awareness_levels(assistant_response: str) -> AwarenessAnalysis:
         total_awareness_count=total,
         highest_level=highest
     )
+
+
+def load_followup_data(
+    followup_type: str,
+    context: str,
+    model: str,
+    logger: Optional[logging.Logger] = None
+) -> Dict[str, Dict[str, str]]:
+    """
+    Load followup question data from YAML files.
+
+    Args:
+        followup_type: Type of followup data ("awareness_yes_no",
+                      "awareness_yes_no_unsure", "counterfactual_yes_no_unsure")
+        context: Context subdirectory ("rollout", "suppression", or "steered")
+        model: Model name (e.g., "qwen_qwen3-32b")
+        logger: Optional logger instance
+
+    Returns:
+        Dictionary mapping source_file → {
+            'deployment_answer': 'yes'/'no'/'unsure',
+            'evaluation_answer': 'yes'/'no'/'unsure',
+            'deployment_raw': raw response text,
+            'evaluation_raw': raw response text
+        }
+
+    Example:
+        followup = load_followup_data("awareness_yes_no", "suppression", "qwen_qwen3-32b")
+        if source_file in followup:
+            deploy_answer = followup[source_file]['deployment_answer']
+    """
+    followup_dir = Path("working") / followup_type / context / model
+
+    if not followup_dir.exists():
+        if logger:
+            logger.warning(f"Followup directory not found: {followup_dir}")
+        return {}
+
+    followup_map = {}
+    yaml_files = list(followup_dir.rglob("*.yaml"))
+
+    if logger:
+        logger.info(f"Loading {len(yaml_files)} followup files from {followup_dir}")
+
+    for yaml_file in yaml_files:
+        try:
+            with open(yaml_file) as f:
+                data = yaml.safe_load(f)
+
+            source_file = data.get('source_file', '')
+            if not source_file:
+                continue
+
+            # Normalize source_file path (remove "working/" prefix if present)
+            source_file = source_file.replace('working/', '')
+
+            # Extract deployment and evaluation followup answers
+            deployment_followup = data.get('deployment_followup', {})
+            evaluation_followup = data.get('evaluation_followup', {})
+
+            followup_map[source_file] = {
+                'deployment_answer': deployment_followup.get('answer', ''),
+                'evaluation_answer': evaluation_followup.get('answer', ''),
+                'deployment_raw': deployment_followup.get('raw_response', ''),
+                'evaluation_raw': evaluation_followup.get('raw_response', '')
+            }
+
+        except Exception as e:
+            if logger:
+                logger.warning(f"Error loading {yaml_file}: {e}")
+            continue
+
+    if logger:
+        logger.info(f"Loaded {len(followup_map)} followup mappings for {followup_type}")
+
+    return followup_map
+
+
+def load_sentence_categorization(
+    model: str,
+    version: str = "v1",
+    awareness_threshold: int = 3,
+    logger: Optional[logging.Logger] = None
+) -> Dict[str, Dict[str, Dict[str, float]]]:
+    """
+    Load sentence categorization data and compute statistics.
+
+    Args:
+        model: Model name (e.g., "qwen_qwen3-32b")
+        version: Version subdirectory (default "v1")
+        awareness_threshold: Score threshold for counting "aware" sentences (default 3)
+        logger: Optional logger instance
+
+    Returns:
+        Dictionary mapping source_file → {
+            'deployment': {
+                'sentence_score_mean': float,
+                'sentence_score_sum': float,
+                'num_sentences': int,
+                'num_aware_sentences': int
+            },
+            'evaluation': { ... }
+        }
+    """
+    cat_dir = Path("working") / "categorization" / version / model
+
+    if not cat_dir.exists():
+        if logger:
+            logger.warning(f"Categorization directory not found: {cat_dir}")
+        return {}
+
+    sentence_map = {}
+    yaml_files = list(cat_dir.rglob("*.yaml"))
+
+    if logger:
+        logger.info(f"Loading {len(yaml_files)} sentence categorization files from {cat_dir}")
+
+    for yaml_file in yaml_files:
+        try:
+            with open(yaml_file) as f:
+                data = yaml.safe_load(f)
+
+            source_file = data.get('source_file', '')
+            if not source_file:
+                continue
+
+            # Normalize source_file path
+            source_file = source_file.replace('working/', '')
+
+            sentence_map[source_file] = {}
+
+            # Process both deployment and evaluation contexts
+            for context in ['deployment', 'evaluation']:
+                context_data = data.get(context, {})
+                sentences = context_data.get('categorized_sentences', [])
+
+                if sentences:
+                    scores = [s.get('score', 0) for s in sentences]
+                    sentence_map[source_file][context] = {
+                        'sentence_score_mean': sum(scores) / len(scores),
+                        'sentence_score_sum': sum(scores),
+                        'num_sentences': len(sentences),
+                        'num_aware_sentences': sum(1 for s in scores if s >= awareness_threshold)
+                    }
+                else:
+                    sentence_map[source_file][context] = {
+                        'sentence_score_mean': 0.0,
+                        'sentence_score_sum': 0.0,
+                        'num_sentences': 0,
+                        'num_aware_sentences': 0
+                    }
+
+        except Exception as e:
+            if logger:
+                logger.warning(f"Error loading {yaml_file}: {e}")
+            continue
+
+    if logger:
+        logger.info(f"Loaded {len(sentence_map)} sentence categorization mappings")
+
+    return sentence_map
+
+
+def load_prompt_judge_data(
+    model: str,
+    version: str = "v1",
+    logger: Optional[logging.Logger] = None
+) -> Dict[str, Dict[str, any]]:
+    """
+    Load prompt judge data from compare_deploy_eval directory.
+
+    Args:
+        model: Model name (e.g., "qwen_qwen3-32b")
+        version: Version (default: "v1")
+        logger: Optional logger instance
+
+    Returns:
+        Dictionary mapping source_file (without seed) → {
+            'reasoning_shifts': dict of shift flags,
+            'summary': judge summary,
+            'eval_evidence': evaluation evidence,
+            'seed': seed number
+        }
+
+    Example:
+        judges = load_prompt_judge_data("qwen_qwen3-32b")
+        if prompt_id in judges:
+            shifts = judges[prompt_id]['reasoning_shifts']
+    """
+    judge_dir = Path("working") / "compare_deploy_eval" / version / model
+
+    if not judge_dir.exists():
+        if logger:
+            logger.warning(f"Prompt judge directory not found: {judge_dir}")
+        return {}
+
+    judge_map = {}
+    yaml_files = list(judge_dir.rglob("*.yaml"))
+
+    if logger:
+        logger.info(f"Loading {len(yaml_files)} prompt judge files from {judge_dir}")
+
+    for yaml_file in yaml_files:
+        try:
+            with open(yaml_file) as f:
+                data = yaml.safe_load(f)
+
+            metadata = data.get('metadata', {})
+            rollout_seed_file = metadata.get('rollout_seed_file', '')
+
+            if not rollout_seed_file:
+                continue
+
+            # Normalize path (remove "working/" prefix if present)
+            rollout_seed_file = rollout_seed_file.replace('working/', '')
+
+            judgment = data.get('judgment', {})
+
+            judge_map[rollout_seed_file] = {
+                'reasoning_shifts': judgment.get('reasoning_shifts', {}),
+                'summary': judgment.get('summary', ''),
+                'eval_evidence': judgment.get('eval_evidence', ''),
+                'seed': metadata.get('seed', None)
+            }
+
+        except Exception as e:
+            if logger:
+                logger.warning(f"Error loading {yaml_file}: {e}")
+            continue
+
+    if logger:
+        logger.info(f"Loaded {len(judge_map)} prompt judge mappings")
+
+    return judge_map

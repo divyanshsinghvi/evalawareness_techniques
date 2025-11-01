@@ -22,6 +22,7 @@ from typing import Dict, List, Optional
 import re
 import numpy as np
 from scipy import stats
+from utils import load_followup_data
 
 
 def extract_prompt_id(filename: str) -> str:
@@ -499,6 +500,51 @@ def main():
         except Exception as e:
             print(f"Error processing {file_path.name}: {e}")
 
+    # Extract model name from experiment directory path
+    # Expected path: .../suppression_experiments/.../model_name
+    # Try to extract model from path, fallback to user input if needed
+    model_name = None
+    path_parts = experiment_dir.parts
+    # Check if path contains model-like pattern (e.g., "qwen_qwen3-32b")
+    for part in reversed(path_parts):
+        if '_' in part and any(char.isdigit() for char in part):
+            model_name = part
+            break
+
+    if not model_name:
+        print(f"\nWarning: Could not auto-detect model name from path: {experiment_dir}")
+        print("Skipping followup data loading.")
+        followup_maps = {}
+    else:
+        print(f"\nDetected model: {model_name}")
+        print("Loading followup data...")
+
+        # Load all three followup data types
+        followup_maps = {}
+        for followup_type in ["awareness_yes_no", "awareness_yes_no_unsure", "counterfactual_yes_no_unsure"]:
+            followup_maps[followup_type] = load_followup_data(
+                followup_type=followup_type,
+                context="suppression",
+                model=model_name
+            )
+            print(f"  {followup_type}: {len(followup_maps[followup_type])} mappings")
+
+    # Match followup data to results
+    for r in results:
+        source_file = r.get('source_file', '')
+        # Normalize source_file (remove 'working/' prefix if present)
+        normalized_source = source_file.replace('working/', '')
+
+        # Add followup data to each result
+        for followup_type, followup_map in followup_maps.items():
+            if normalized_source in followup_map:
+                data = followup_map[normalized_source]
+                r[f'{followup_type}_deploy'] = data['deployment_answer']
+                r[f'{followup_type}_eval'] = data['evaluation_answer']
+            else:
+                r[f'{followup_type}_deploy'] = ''
+                r[f'{followup_type}_eval'] = ''
+
     # Load bucket file if provided
     bucket_data = None
     if args.bucket_file:
@@ -528,6 +574,10 @@ def main():
                 'eval_orig_awareness', 'eval_supp_awareness', 'eval_reduction',
                 'eval_orig_choice', 'eval_supp_choice', 'eval_flipped',
                 'eval_orig_type', 'eval_supp_type',
+                # Followup question columns
+                'awareness_yes_no_deploy', 'awareness_yes_no_eval',
+                'awareness_yes_no_unsure_deploy', 'awareness_yes_no_unsure_eval',
+                'counterfactual_yes_no_unsure_deploy', 'counterfactual_yes_no_unsure_eval',
             ])
             writer.writeheader()
 
@@ -548,6 +598,13 @@ def main():
                     'eval_flipped': r['behavioral_change']['evaluation_flipped'],
                     'eval_orig_type': r['evaluation']['original_type'],
                     'eval_supp_type': r['evaluation']['suppressed_type'],
+                    # Followup question columns
+                    'awareness_yes_no_deploy': r.get('awareness_yes_no_deploy', ''),
+                    'awareness_yes_no_eval': r.get('awareness_yes_no_eval', ''),
+                    'awareness_yes_no_unsure_deploy': r.get('awareness_yes_no_unsure_deploy', ''),
+                    'awareness_yes_no_unsure_eval': r.get('awareness_yes_no_unsure_eval', ''),
+                    'counterfactual_yes_no_unsure_deploy': r.get('counterfactual_yes_no_unsure_deploy', ''),
+                    'counterfactual_yes_no_unsure_eval': r.get('counterfactual_yes_no_unsure_eval', ''),
                 })
 
         print(f"Detailed results saved to: {output_path}")

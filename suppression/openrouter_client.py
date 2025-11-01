@@ -258,13 +258,19 @@ class OpenRouterClient:
         """
         messages = base_messages.copy()
 
+        # Determine if we need backslash after closing tag (model-specific)
+        needs_backslash = self.model == "qwen/qwen3-30b-a3b-thinking-2507"
+
         # Handle force_close_thinking even when both reasoning and content are empty
         if force_close_thinking and not prefill_reasoning and not prefill_content:
             # Force close thinking tag with minimal content to prevent model from opening NEW thinking
             # CRITICAL: For complex prompts, model ignores <think></think> and opens NEW thinking
             # Adding minimal text "Okay\n" inside thinking prevents this behavior
             # The model sees thinking already started and closed, so it continues with content
-            assistant_content = f"<{self.thinking_tag}>Okay\n</{self.thinking_tag}>\n"
+            if needs_backslash:
+                assistant_content = f"<{self.thinking_tag}>Okay\n</{self.thinking_tag}>\n\\"
+            else:
+                assistant_content = f"<{self.thinking_tag}>Okay\n</{self.thinking_tag}>\n"
             messages.append({
                 "role": "assistant",
                 "content": assistant_content
@@ -278,7 +284,10 @@ class OpenRouterClient:
                 assistant_content = f"<{self.thinking_tag}>\n{prefill_reasoning}"
                 if prefill_content or force_close_thinking:
                     # Close thinking tag and add content (or force close to start content generation)
-                    assistant_content += f"\n</{self.thinking_tag}>\n{prefill_content}"
+                    if needs_backslash:
+                        assistant_content += f"\n</{self.thinking_tag}>\n\\{prefill_content}"
+                    else:
+                        assistant_content += f"\n</{self.thinking_tag}>\n{prefill_content}"
             elif prefill_content:
                 # Only content, no thinking
                 assistant_content = prefill_content

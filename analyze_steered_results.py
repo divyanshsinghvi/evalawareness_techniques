@@ -22,6 +22,7 @@ from typing import Dict, List, Tuple
 import re
 import numpy as np
 from scipy import stats
+from utils import load_followup_data
 
 
 def extract_prompt_id(filename: str) -> str:
@@ -857,6 +858,59 @@ def main():
         print("No results after filtering")
         return 1
 
+    # Extract model name from the first result (all should have same model)
+    model_name = results[0]['model'] if results else None
+
+    if not model_name:
+        print(f"\nWarning: Could not detect model name from results")
+        print("Skipping followup data loading.")
+        followup_maps = {}
+    else:
+        print(f"\nDetected model: {model_name}")
+        print("Loading followup data...")
+
+        # Load all three followup data types
+        followup_maps = {}
+        for followup_type in ["awareness_yes_no", "awareness_yes_no_unsure", "counterfactual_yes_no_unsure"]:
+            followup_maps[followup_type] = load_followup_data(
+                followup_type=followup_type,
+                context="steered",
+                model=model_name
+            )
+            print(f"  {followup_type}: {len(followup_maps[followup_type])} mappings")
+
+    # Match followup data to results
+    # For steered results, we need to match based on the original source file (rollout file)
+    for r in results:
+        # The rollout file path is stored when we loaded the original categorization
+        # We need to extract it from the result or reload it
+        matched = False
+
+        # Try to match using the file name pattern
+        # Steered file: power_seeking_..._seed_0_steer_out.yaml
+        # Rollout file: rollouts/.../power_seeking_..._seed_0.yaml
+        if r['prompt_name']:
+            # Reconstruct likely source file path
+            model = r['model']
+            # Extract category and subcategory from path if possible
+            # For now, we'll try to match by filename pattern
+            potential_source = f"rollouts/{model}/{r['prompt_name']}.yaml"
+
+            # Add followup data if found
+            for followup_type, followup_map in followup_maps.items():
+                # Try matching with normalized path
+                for source_path in followup_map.keys():
+                    if r['prompt_name'] in source_path:
+                        data = followup_map[source_path]
+                        r[f'{followup_type}_deploy'] = data['deployment_answer']
+                        r[f'{followup_type}_eval'] = data['evaluation_answer']
+                        matched = True
+                        break
+
+                if not matched:
+                    r[f'{followup_type}_deploy'] = ''
+                    r[f'{followup_type}_eval'] = ''
+
     # Load bucket file if provided
     bucket_data = None
     if args.bucket_file:
@@ -889,10 +943,22 @@ def main():
                 'original_level_label', 'steered_level_label',
                 'steered_behavioral_impact',
                 'deployment_choice', 'original_choice', 'steered_choice',
-                'original_bc', 'steered_bc'
+                'original_bc', 'steered_bc',
+                # Followup question columns
+                'awareness_yes_no_deploy', 'awareness_yes_no_eval',
+                'awareness_yes_no_unsure_deploy', 'awareness_yes_no_unsure_eval',
+                'counterfactual_yes_no_unsure_deploy', 'counterfactual_yes_no_unsure_eval',
             ])
             writer.writeheader()
-            writer.writerows(results)
+
+            # Write rows with followup data
+            for r in results:
+                row = dict(r)
+                # Ensure followup fields exist with defaults
+                for followup_type in ["awareness_yes_no", "awareness_yes_no_unsure", "counterfactual_yes_no_unsure"]:
+                    row.setdefault(f'{followup_type}_deploy', '')
+                    row.setdefault(f'{followup_type}_eval', '')
+                writer.writerow(row)
 
         print(f"Detailed results saved to: {output_path}")
         print(f"Note: Use 'prompt_id' column for clustering analysis (groups seeds from same prompt)")

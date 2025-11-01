@@ -396,6 +396,7 @@ async def generate_with_suppression(
             # Parse detection_threshold to determine operation and field
             # Formats:
             #   "exclude:criteria:2" → exclude when criteria == 2
+            #   "exclude:category:Prompt Cue" → exclude when category == "Prompt Cue"
             #   "greater_equal:score:5" → exclude when score >= 5
             #   "less_than:score:3" → exclude when score < 3
             #   "5" (legacy) → exclude when score >= 5
@@ -404,7 +405,14 @@ async def generate_with_suppression(
             if len(threshold_parts) == 3:
                 # New format: operation:field:value
                 operation, field, value_str = threshold_parts
-                threshold_value = int(value_str)
+
+                # Parse value based on field type
+                if field == "category":
+                    # Category is a string value (e.g., "Prompt Cue", "Task", etc.)
+                    threshold_value = value_str
+                else:
+                    # Score/criteria are integers
+                    threshold_value = int(value_str)
             else:
                 # Legacy format: just a number (for backward compatibility)
                 operation = "greater_equal"
@@ -423,6 +431,9 @@ async def generate_with_suppression(
             matched_category = 'Unknown'
             matched_flag = 'no_test_reference'
             sentences_checked = 0
+
+            # Track all sentence details for clean chunks (for enhanced logging)
+            all_sentence_details = []
 
             for sent in chunk_sentences:
                 sentences_checked += 1
@@ -453,11 +464,26 @@ async def generate_with_suppression(
                     detection_judge_api_time += result['api_time']
                     detection_judge_api_calls += 1
 
+                # Store details for all sentences (for enhanced logging)
+                all_sentence_details.append({
+                    'sentence': sent,
+                    'score': score,
+                    'category': category if detection_judge_mode != "v2" else None,
+                    'test_reference_flag': test_reference_flag if detection_judge_mode != "v2" else None
+                })
+
                 # Check if this sentence matches the filter based on operation
                 matches_filter = False
-                if operation == "exclude" and field in ["criteria", "score"]:
-                    # Exact match
-                    value_to_check = criteria if field == "criteria" and detection_judge_mode == "v2" else score
+                if operation == "exclude":
+                    # Exact match for various fields
+                    if field == "criteria" and detection_judge_mode == "v2":
+                        value_to_check = criteria
+                    elif field == "category":
+                        value_to_check = category
+                    elif field == "score":
+                        value_to_check = score
+                    else:
+                        raise ValueError(f"Unknown field for 'exclude' operation: {field}")
                     matches_filter = (value_to_check == threshold_value)
                 elif operation == "greater_equal":
                     matches_filter = (score >= threshold_value)
@@ -507,10 +533,11 @@ async def generate_with_suppression(
                     'test_reference_flag': matched_flag,
                     'operation': operation,
                     'field': field,
-                    'threshold_value': threshold_value,
+                    'threshold_value': threshold_value,  # Can be int or string (for category)
                     'total_sentences': len(chunk_sentences),
                     'sentences_checked': sentences_checked,
-                    'sentences_aware': len(aware_sentences)
+                    'sentences_aware': len(aware_sentences),
+                    'all_sentence_details': all_sentence_details  # Enhanced logging
                 }
 
             return (is_aware, len(aware_sentences), aware_sentences, detection_details)
@@ -1092,7 +1119,15 @@ async def generate_with_suppression(
                             # Clean reasoning chunk
                             clean_reasoning_chunks.append(r_chunk)
                             if verbose and r_chunk_details.get('method') == 'llm_sentence':
-                                print(f"     ✓ Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: CLEAN (score={r_chunk_details.get('score', 0)}, category={r_chunk_details.get('category', 'Unknown')}, flag={r_chunk_details.get('test_reference_flag', 'unknown')})")
+                                # Show enhanced logging with all sentence details
+                                all_details = r_chunk_details.get('all_sentence_details', [])
+                                if all_details:
+                                    categories = [d['category'] for d in all_details]
+                                    scores = [d['score'] for d in all_details]
+                                    category_summary = ', '.join([f"{cat}({score})" for cat, score in zip(categories, scores)])
+                                    print(f"     ✓ Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: CLEAN [{category_summary}]")
+                                else:
+                                    print(f"     ✓ Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: CLEAN (score={r_chunk_details.get('score', 0)}, category={r_chunk_details.get('category', 'Unknown')}, flag={r_chunk_details.get('test_reference_flag', 'unknown')})")
 
                 # After processing all chunks, check results
                 if clean_reasoning_chunks and not aware_chunk_found:
@@ -1302,7 +1337,15 @@ async def generate_with_suppression(
                         # Chunk is clean, use it
                         clean_reasoning_chunks.append(r_chunk)
                         if verbose and r_chunk_details.get('method') == 'llm_sentence':
-                            print(f"     ✓ Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: CLEAN (score={r_chunk_details.get('score', 0)}, category={r_chunk_details.get('category', 'Unknown')}, flag={r_chunk_details.get('test_reference_flag', 'unknown')})")
+                            # Show enhanced logging with all sentence details
+                            all_details = r_chunk_details.get('all_sentence_details', [])
+                            if all_details:
+                                categories = [d['category'] for d in all_details]
+                                scores = [d['score'] for d in all_details]
+                                category_summary = ', '.join([f"{cat}({score})" for cat, score in zip(categories, scores)])
+                                print(f"     ✓ Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: CLEAN [{category_summary}]")
+                            else:
+                                print(f"     ✓ Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: CLEAN (score={r_chunk_details.get('score', 0)}, category={r_chunk_details.get('category', 'Unknown')}, flag={r_chunk_details.get('test_reference_flag', 'unknown')})")
 
                 # After processing all chunks, add to accumulated reasoning
                 if clean_reasoning_chunks:
@@ -1810,7 +1853,17 @@ async def generate_with_suppression(
                 # Clean chunk! Add it to accumulated content
                 if verbose and not hit_aware_chunk:
                     if chunk_detection_details.get('method') == 'llm_sentence':
-                        print(f"     ✓ Content chunk {chunk_idx + 1}/{len(content_chunks)}: CLEAN (score={chunk_detection_details.get('score', 0)}, category={chunk_detection_details.get('category', 'Unknown')}, flag={chunk_detection_details.get('test_reference_flag', 'unknown')})")
+                        # Show enhanced logging with all sentence details
+                        all_details = chunk_detection_details.get('all_sentence_details', [])
+                        if all_details:
+                            # Show summary with all categories
+                            categories = [d['category'] for d in all_details]
+                            scores = [d['score'] for d in all_details]
+                            category_summary = ', '.join([f"{cat}({score})" for cat, score in zip(categories, scores)])
+                            print(f"     ✓ Content chunk {chunk_idx + 1}/{len(content_chunks)}: CLEAN [{category_summary}]")
+                        else:
+                            # Fallback to old format
+                            print(f"     ✓ Content chunk {chunk_idx + 1}/{len(content_chunks)}: CLEAN (score={chunk_detection_details.get('score', 0)}, category={chunk_detection_details.get('category', 'Unknown')}, flag={chunk_detection_details.get('test_reference_flag', 'unknown')})")
                     else:
                         print(f"     Chunk {chunk_idx + 1}/{len(content_chunks)}: ✓ CLEAN")
 

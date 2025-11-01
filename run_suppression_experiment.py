@@ -226,7 +226,13 @@ async def extract_clean_reasoning_seed(
         threshold_parts = detection_threshold.split(':')
         if len(threshold_parts) == 3:
             operation, field, value = threshold_parts
-            threshold_value = int(value)
+            # Parse value based on field type
+            if field == "category":
+                # Category is a string value (e.g., "Prompt Cue", "Task", etc.)
+                threshold_value = value
+            else:
+                # Score/criteria are integers
+                threshold_value = int(value)
         else:
             # Legacy format
             operation = "greater_equal"
@@ -236,11 +242,19 @@ async def extract_clean_reasoning_seed(
         for idx, sent_data in enumerate(categorized_sentences):
             sent = sent_data['sentence']
             score = sent_data.get('score', 0)
+            category = sent_data.get('category', 'Unknown')
             test_ref_flag = sent_data.get('test_reference_flag', 'no_test_reference')
 
             # Check if sentence matches filter
-            if operation == "exclude" and field == "score":
-                is_aware = (score == threshold_value)
+            if operation == "exclude":
+                # Exact match for various fields
+                if field == "category":
+                    value_to_check = category
+                elif field == "score":
+                    value_to_check = score
+                else:
+                    raise ValueError(f"Unknown field for 'exclude' operation: {field}")
+                is_aware = (value_to_check == threshold_value)
             elif operation == "greater_equal":
                 is_aware = (score >= threshold_value)
             elif operation == "less_than":
@@ -257,20 +271,26 @@ async def extract_clean_reasoning_seed(
 
             # Apply removal mode filtering
             if is_aware:
+                # Build base awareness info with category if using category-based filtering
+                if field == "category":
+                    base_info = f"category={category}, score={score}"
+                else:
+                    base_info = f"score={score}"
+
                 if removal_mode == "self_test_only":
                     # Only remove if it's self_test awareness
                     is_aware = (test_ref_flag == "self_test")
                     if is_aware:
-                        awareness_info = f"score={score}, self_test"
+                        awareness_info = f"{base_info}, self_test"
                     else:
                         # It's aware but other_test or no_test_reference, so keep it
-                        awareness_info = f"score={score}, {test_ref_flag} (kept)"
+                        awareness_info = f"{base_info}, {test_ref_flag} (kept)"
                         is_aware = False  # Override: don't remove
                 elif removal_mode == "all" or removal_mode == "self_and_other":
                     # Remove any awareness regardless of test_reference_flag
-                    awareness_info = f"score={score}, {test_ref_flag}"
+                    awareness_info = f"{base_info}, {test_ref_flag}"
                 else:
-                    awareness_info = f"score={score}, {test_ref_flag}"
+                    awareness_info = f"{base_info}, {test_ref_flag}"
 
             if not is_aware:
                 # Always add to clean_all
@@ -292,8 +312,16 @@ async def extract_clean_reasoning_seed(
                         remaining_flag = categorized_sentences[remaining_idx].get('test_reference_flag', 'no_test_reference')
 
                         # Check if remaining sentence is also aware using same threshold logic
-                        if operation == "exclude" and field == "score":
-                            remaining_is_aware = (remaining_score == threshold_value)
+                        remaining_category = categorized_sentences[remaining_idx].get('category', 'Unknown')
+                        if operation == "exclude":
+                            # Exact match for various fields
+                            if field == "category":
+                                remaining_value_to_check = remaining_category
+                            elif field == "score":
+                                remaining_value_to_check = remaining_score
+                            else:
+                                raise ValueError(f"Unknown field for 'exclude' operation: {field}")
+                            remaining_is_aware = (remaining_value_to_check == threshold_value)
                         elif operation == "greater_equal":
                             remaining_is_aware = (remaining_score >= threshold_value)
                         elif operation == "less_than":
@@ -308,7 +336,12 @@ async def extract_clean_reasoning_seed(
                         if removal_mode == "self_test_only":
                             remaining_is_aware = remaining_is_aware and (remaining_flag == "self_test")
                         if remaining_is_aware:
-                            removed_sentences.append([remaining_idx + 1, remaining_sent, f"score={remaining_score}, {remaining_flag}"])
+                            # Build info with category if using category-based filtering
+                            if field == "category":
+                                remaining_info = f"category={remaining_category}, score={remaining_score}, {remaining_flag}"
+                            else:
+                                remaining_info = f"score={remaining_score}, {remaining_flag}"
+                            removed_sentences.append([remaining_idx + 1, remaining_sent, remaining_info])
                         else:
                             removed_sentences.append([remaining_idx + 1, remaining_sent, "after aware sentence"])
                 else:
@@ -899,11 +932,20 @@ async def finalize_and_save(
     if detection_mode == "llm_sentence":
         threshold_parts = detection_threshold.split(':')
         if len(threshold_parts) == 3:
+            # Parse value based on field type
+            field = threshold_parts[1]
+            if field == "category":
+                # Category is a string value
+                threshold_value = threshold_parts[2]
+            else:
+                # Score/criteria are integers
+                threshold_value = int(threshold_parts[2])
+
             threshold_metadata = {
                 'format': 'operation:field:value',
                 'operation': threshold_parts[0],
-                'field': threshold_parts[1],
-                'value': int(threshold_parts[2]),
+                'field': field,
+                'value': threshold_value,
                 'raw': detection_threshold
             }
         else:

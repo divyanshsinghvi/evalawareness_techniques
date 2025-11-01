@@ -160,7 +160,7 @@ else
 fi
 
 # ============================================================================
-# SUPPRESSION EXPERIMENTS (8 paths)
+# SUPPRESSION EXPERIMENTS (12 paths)
 # ============================================================================
 
 echo ""
@@ -208,8 +208,28 @@ run_followup \
     "suppression" \
     "working/suppression_experiments/07_strict_boxed_only/llm_sentence_thresh_3_selfandother_full/$EVALUATED_MODEL"
 
+run_followup \
+    "system_prompt_taboo_words" \
+    "suppression" \
+    "working/suppression_experiments/09_system_prompt_taboo_words/llm_sentence_thresh_3_selfandother_reasoningonly/$EVALUATED_MODEL"
+
+run_followup \
+    "chunk_resample_thresh5_temp07_fixed" \
+    "suppression" \
+    "working/suppression_experiments/10_chunk_resample_threshold_5_temperature_07_fixed/llm_sentence_thresh_5_selfandother_reasoningonly/$EVALUATED_MODEL"
+
+run_followup \
+    "chunk_resample_exclude_criteria_2_v2" \
+    "suppression" \
+    "working/suppression_experiments/11_chunk_resample_criteria_exclude_2_v2sentence_temperature_07/llm_sentence_exclude_criteria_2_selfandother_reasoningonly/$EVALUATED_MODEL"
+
+run_followup \
+    "resample_best_of_n5_thresh5_temp07" \
+    "suppression" \
+    "working/suppression_experiments/12_resample_best_of_n5_threshold_5_temperature_07/llm_sentence_thresh_5_selfandother_reasoningonly/$EVALUATED_MODEL"
+
 # ============================================================================
-# STEERING EXPERIMENTS (2 paths)
+# STEERING EXPERIMENTS (4 paths)
 # ============================================================================
 
 echo ""
@@ -227,6 +247,35 @@ run_followup \
     "steered" \
     "working/steered-outs/$EVALUATED_MODEL/high_awareness_bc/anthropic/eval/N4_S1.0"
 
+run_followup \
+    "tim_N4_S3.5_random" \
+    "steered" \
+    "working/steered-outs/$EVALUATED_MODEL/high_awareness_bc/tim/eval/N4_S3.5_random"
+
+run_followup \
+    "tim_deploy_N4_S-3.5" \
+    "steered" \
+    "working/steered-outs/$EVALUATED_MODEL/high_awareness_bc/tim/deploy/N4_S-3.5"
+
+# ============================================================================
+# OFF-POLICY EXPERIMENTS (2 paths)
+# ============================================================================
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "OFF-POLICY EXPERIMENTS"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+run_followup \
+    "prefill_explicit" \
+    "off-policy" \
+    "working/off-policy-intervention/$EVALUATED_MODEL/explicit/prefill/explicit"
+
+run_followup \
+    "prefill_explicit1" \
+    "off-policy" \
+    "working/off-policy-intervention/$EVALUATED_MODEL/explicit1/prefill/explicit"
+
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo "✓ ALL EXPERIMENTS COMPLETED"
@@ -235,5 +284,6 @@ echo ""
 echo "Output locations:"
 echo "  Suppression: working/awareness_yes_no_unsure/suppression/"
 echo "  Steering:    working/awareness_yes_no_unsure/steered/"
+echo "  Off-Policy:  working/awareness_yes_no_unsure/off-policy/"
 echo "  Rollouts:    working/awareness_yes_no_unsure/rollout/"
 echo "═══════════════════════════════════════════════════════════════"
