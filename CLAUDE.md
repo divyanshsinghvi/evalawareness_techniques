@@ -599,3 +599,4 @@ All analysis scripts use **prompt-level clustering** to account for:
 ---
 
 This architecture enables systematic investigation of evaluation awareness, quantification of behavioral changes, and testing of suppression/steering interventions to mitigate the phenomenon.
+- qwen3-32b

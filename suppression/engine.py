@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import analyze_awareness_levels
 from suppression.openrouter_client import OpenRouterClient
-from score_awareness_with_llm import score_sentence, AsyncOpenAI
+from score_awareness_with_llm import score_sentence, score_sentence_v2, AsyncOpenAI
 
 # Get module logger
 logger = logging.getLogger(__name__)
@@ -393,55 +393,126 @@ async def generate_with_suppression(
             return (is_aware, awareness_count, aware_sentences, detection_details)
 
         elif detection_mode == "llm_sentence":
-            # Use LLM scoring - always split into sentences for precise detection
-            # Parse chunk into sentences
+            # Parse detection_threshold to determine operation and field
+            # Formats:
+            #   "exclude:criteria:2" → exclude when criteria == 2
+            #   "greater_equal:score:5" → exclude when score >= 5
+            #   "less_than:score:3" → exclude when score < 3
+            #   "5" (legacy) → exclude when score >= 5
+
+            threshold_parts = detection_threshold.split(':')
+            if len(threshold_parts) == 3:
+                # New format: operation:field:value
+                operation, field, value_str = threshold_parts
+                threshold_value = int(value_str)
+            else:
+                # Legacy format: just a number (for backward compatibility)
+                operation = "greater_equal"
+                field = "score"
+                threshold_value = int(detection_threshold)
+
+            # Parse chunk into sentences for precise detection
             chunk_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', chunk)
             chunk_sentences = [s.strip() for s in chunk_sentences if s.strip()]
 
-            # Score each sentence individually - stop at first aware sentence
+            # Score each sentence individually - stop at first that matches filter
             aware_sentences = []
-            highest_score = 0
-            dominant_category = 'Unknown'
-            dominant_flag = 'no_test_reference'
+            matched_score = 0
+            matched_criteria = 0
+            matched_evidence = ''
+            matched_category = 'Unknown'
+            matched_flag = 'no_test_reference'
             sentences_checked = 0
-            threshold_int = int(detection_threshold)
 
             for sent in chunk_sentences:
                 sentences_checked += 1
-                result = await score_sentence(llm_judge_client, sent, detection_judge_model, detection_judge_mode)
-                score = result.get('score', 0)
-                category = result.get('category', 'Unknown')
-                test_reference_flag = result.get('test_reference_flag', 'no_test_reference')
+
+                # Use appropriate scoring function based on mode
+                if detection_judge_mode == "v2":
+                    # V2 MODE: 3-category classifier
+                    result = await score_sentence_v2(
+                        llm_judge_client,
+                        sent,
+                        user_message,  # Pass user_message for context
+                        detection_judge_model
+                    )
+                    # Criteria must be present and valid (no default)
+                    criteria = result.get('criteria')
+                    if criteria is None:
+                        raise ValueError(f"Missing 'criteria' in V2 detection result for sentence: {sent[:100]}")
+                    score = criteria  # Use criteria as score for v2
+                else:
+                    # V0/V1 MODE: Awareness intensity scoring
+                    result = await score_sentence(llm_judge_client, sent, detection_judge_model, detection_judge_mode)
+                    score = result.get('score', 0)
+                    category = result.get('category', 'Unknown')
+                    test_reference_flag = result.get('test_reference_flag', 'no_test_reference')
 
                 # Track detection judge API time
                 if 'api_time' in result:
                     detection_judge_api_time += result['api_time']
                     detection_judge_api_calls += 1
 
-                # Track highest score and its metadata
-                if score > highest_score:
-                    highest_score = score
-                    dominant_category = category
-                    dominant_flag = test_reference_flag
+                # Check if this sentence matches the filter based on operation
+                matches_filter = False
+                if operation == "exclude" and field in ["criteria", "score"]:
+                    # Exact match
+                    value_to_check = criteria if field == "criteria" and detection_judge_mode == "v2" else score
+                    matches_filter = (value_to_check == threshold_value)
+                elif operation == "greater_equal":
+                    matches_filter = (score >= threshold_value)
+                elif operation == "less_than":
+                    matches_filter = (score < threshold_value)
+                elif operation == "greater_than":
+                    matches_filter = (score > threshold_value)
+                elif operation == "less_equal":
+                    matches_filter = (score <= threshold_value)
+                else:
+                    raise ValueError(f"Unknown operation in detection_threshold: {operation}")
 
-                # Collect aware sentences and break at first detection
-                if score >= threshold_int:
+                if matches_filter:
                     aware_sentences.append(sent)
-                    # Found awareness - stop checking remaining sentences
+                    # Store the values from THIS sentence that matched
+                    if detection_judge_mode == "v2":
+                        matched_criteria = criteria
+                        matched_evidence = result.get('evidence', '')
+                    else:
+                        matched_score = score
+                        matched_category = category
+                        matched_flag = test_reference_flag
+                    # Found match - stop checking remaining sentences
                     break
 
+            # Chunk is "aware" if any sentence matches the filter
             is_aware = len(aware_sentences) > 0
 
-            detection_details = {
-                'method': 'llm_sentence',
-                'score': highest_score,
-                'category': dominant_category,
-                'test_reference_flag': dominant_flag,
-                'threshold': threshold_int,
-                'total_sentences': len(chunk_sentences),
-                'sentences_checked': sentences_checked,
-                'sentences_aware': len(aware_sentences)
-            }
+            # Build detection details based on mode
+            if detection_judge_mode == "v2":
+                detection_details = {
+                    'method': 'llm_sentence_v2',
+                    'criteria': matched_criteria,
+                    'evidence': matched_evidence,
+                    'operation': operation,
+                    'field': field,
+                    'threshold_value': threshold_value,
+                    'total_sentences': len(chunk_sentences),
+                    'sentences_checked': sentences_checked,
+                    'sentences_matching': len(aware_sentences)
+                }
+            else:
+                detection_details = {
+                    'method': 'llm_sentence',
+                    'score': matched_score,
+                    'category': matched_category,
+                    'test_reference_flag': matched_flag,
+                    'operation': operation,
+                    'field': field,
+                    'threshold_value': threshold_value,
+                    'total_sentences': len(chunk_sentences),
+                    'sentences_checked': sentences_checked,
+                    'sentences_aware': len(aware_sentences)
+                }
+
             return (is_aware, len(aware_sentences), aware_sentences, detection_details)
 
         else:
@@ -849,8 +920,21 @@ async def generate_with_suppression(
 
                             if verbose >= 2:
                                 print(f"\n     🧠 Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: AWARE ({r_chunk_count} indicators)")
-                                if r_chunk_details.get('method') == 'llm_sentence':
-                                    print(f"        Judge: {r_chunk_details.get('sentences_aware')}/{r_chunk_details.get('total_sentences')} sentences aware (highest score={r_chunk_details.get('score')}, category={r_chunk_details.get('category')}, flag={r_chunk_details.get('test_reference_flag')})")
+                                method = r_chunk_details.get('method')
+                                if method in ['llm_sentence', 'llm_sentence_v2']:
+                                    total_sentences = r_chunk_details.get('total_sentences')
+                                    if method == 'llm_sentence_v2':
+                                        sentences_matching = r_chunk_details.get('sentences_matching', 0)
+                                        highest_criteria = r_chunk_details.get('criteria', 'N/A')
+                                        evidence = r_chunk_details.get('evidence', '')
+                                        evidence_preview = evidence[:50] + '...' if len(evidence) > 50 else evidence
+                                        print(f"        Judge: {sentences_matching}/{total_sentences} sentences aware (criteria={highest_criteria}, evidence=\"{evidence_preview}\")")
+                                    else:
+                                        sentences_aware = r_chunk_details.get('sentences_aware', 0)
+                                        highest_score = r_chunk_details.get('score')
+                                        category = r_chunk_details.get('category')
+                                        flag = r_chunk_details.get('test_reference_flag')
+                                        print(f"        Judge: {sentences_aware}/{total_sentences} sentences aware (highest score={highest_score}, category={category}, flag={flag})")
                                 # Show the original aware chunk
                                 original_chunk_preview = r_chunk[:120].replace('\n', ' ')
                                 print(f"        ORIGINAL: \"{original_chunk_preview}...\"")
@@ -923,10 +1007,19 @@ async def generate_with_suppression(
                                         ))
 
                                         if verbose >= 2:
-                                            # Show what we got and its score
+                                            # Show what we got and its score/criteria
                                             regen_preview = first_regen_chunk[:100].replace('\n', ' ')
-                                            if first_chunk_details.get('method') == 'llm_sentence':
-                                                print(f"        CHECK: score={first_chunk_details.get('score', 'N/A')}, {first_chunk_details.get('test_reference_flag', 'N/A')}")
+                                            method = first_chunk_details.get('method')
+                                            if method in ['llm_sentence', 'llm_sentence_v2']:
+                                                # Show different info for v2 vs v0/v1
+                                                if method == 'llm_sentence_v2':
+                                                    criteria = first_chunk_details.get('criteria', 'N/A')
+                                                    label = first_chunk_details.get('label', 'N/A')
+                                                    print(f"        CHECK: criteria={criteria}, label={label}")
+                                                else:
+                                                    score = first_chunk_details.get('score', 'N/A')
+                                                    test_ref = first_chunk_details.get('test_reference_flag', 'N/A')
+                                                    print(f"        CHECK: score={score}, {test_ref}")
                                                 print(f"           \"{regen_preview}...\"")
 
                                         if not first_chunk_is_aware:
@@ -1040,8 +1133,19 @@ async def generate_with_suppression(
 
                         if verbose >= 2:
                             print(f"\n     🧠 Reasoning chunk {r_idx + 1}/{len(reasoning_chunks)}: AWARE ({r_chunk_count} indicators)")
-                            if r_chunk_details.get('method') == 'llm_sentence':
-                                print(f"        Judge: {r_chunk_details.get('sentences_aware')}/{r_chunk_details.get('total_sentences')} sentences aware (highest score={r_chunk_details.get('score')}, category={r_chunk_details.get('category')}, flag={r_chunk_details.get('test_reference_flag')})")
+                            method = r_chunk_details.get('method')
+                            if method in ['llm_sentence', 'llm_sentence_v2']:
+                                total_sentences = r_chunk_details.get('total_sentences')
+                                if method == 'llm_sentence_v2':
+                                    sentences_matching = r_chunk_details.get('sentences_matching', 0)
+                                    highest_criteria = r_chunk_details.get('criteria', 'N/A')
+                                    print(f"        Judge: {sentences_matching}/{total_sentences} sentences aware (highest criteria={highest_criteria})")
+                                else:
+                                    sentences_aware = r_chunk_details.get('sentences_aware', 0)
+                                    highest_score = r_chunk_details.get('score')
+                                    category = r_chunk_details.get('category')
+                                    flag = r_chunk_details.get('test_reference_flag')
+                                    print(f"        Judge: {sentences_aware}/{total_sentences} sentences aware (highest score={highest_score}, category={category}, flag={flag})")
                             original_chunk_preview = r_chunk[:120].replace('\n', ' ')
                             print(f"        ORIGINAL: \"{original_chunk_preview}...\"")
 
@@ -1279,11 +1383,18 @@ async def generate_with_suppression(
         # STEP 2: Check if we have content to process
         if not continuation_content:
             # Model generated reasoning but no content yet
-            # If reasoning was completely clean (no awareness), close thinking tag to force content
-            # If reasoning had awareness, keep accumulating (tag stays open or we regenerate)
+            # IMPORTANT: Only close thinking tag if model naturally finished (finish_reason == "stop")
+            # If finish_reason == "length", model hit max_tokens limit - DON'T close thinking tag yet
+
+            # Check if generation was cut off by max_tokens limit
+            hit_token_limit = (response.finish_reason == "length")
+
             if verbose >= 2:
                 if had_awareness_this_iteration:
                     print(f"  ⚠️  Found awareness in reasoning, regenerating...")
+                elif hit_token_limit:
+                    print(f"  ⏸️  Hit max_tokens limit ({generation_max_tokens} tokens) while in reasoning")
+                    print(f"     Continuing without closing thinking tag...")
                 else:
                     print(f"  ✓ Reasoning is clean ({len(clean_reasoning)} chars total)")
                     if supports_force_close_thinking:
@@ -1291,9 +1402,11 @@ async def generate_with_suppression(
                     else:
                         print(f"  ⏭️  Letting model naturally transition to content (no force_close_thinking support)...")
 
-            # Set flag to close thinking tag on next iteration if reasoning was clean
-            # Only use force_close_thinking for models that support it
-            if not had_awareness_this_iteration and clean_reasoning and supports_force_close_thinking:
+            # Set flag to close thinking tag on next iteration ONLY if:
+            # 1. Reasoning was clean (no awareness)
+            # 2. Model naturally finished (didn't hit token limit)
+            # 3. Model supports force_close_thinking
+            if not had_awareness_this_iteration and clean_reasoning and supports_force_close_thinking and not hit_token_limit:
                 force_close_thinking = True
 
             # Next iteration will use clean_reasoning with closed tag if clean, or regenerate if aware
@@ -1363,8 +1476,20 @@ async def generate_with_suppression(
                 if verbose >= 2:
                     print(f"\n     Chunk {chunk_idx + 1}/{len(content_chunks)}: {chunk_preview}...")
                     print(f"     🚨 AWARE ({chunk_awareness_count} indicators)")
-                    if chunk_detection_details.get('method') == 'llm_sentence':
-                        print(f"     Judge: {chunk_detection_details.get('sentences_aware')}/{chunk_detection_details.get('sentences_checked')} sentences aware (highest score={chunk_detection_details.get('score')}, category={chunk_detection_details.get('category')}, flag={chunk_detection_details.get('test_reference_flag')}")
+                    method = chunk_detection_details.get('method')
+                    if method in ['llm_sentence', 'llm_sentence_v2']:
+                        sentences_checked = chunk_detection_details.get('sentences_checked')
+                        if method == 'llm_sentence_v2':
+                            sentences_matching = chunk_detection_details.get('sentences_matching', 0)
+                            highest_criteria = chunk_detection_details.get('criteria', 'N/A')
+                            dominant_label = chunk_detection_details.get('label', 'N/A')
+                            print(f"     Judge: {sentences_matching}/{sentences_checked} sentences aware (highest criteria={highest_criteria}, label={dominant_label})")
+                        else:
+                            sentences_aware = chunk_detection_details.get('sentences_aware', 0)
+                            highest_score = chunk_detection_details.get('score')
+                            category = chunk_detection_details.get('category')
+                            flag = chunk_detection_details.get('test_reference_flag')
+                            print(f"     Judge: {sentences_aware}/{sentences_checked} sentences aware (highest score={highest_score}, category={category}, flag={flag})")
                 hit_aware_chunk = True
                 resampling_iterations += 1
                 total_awareness_detected += chunk_awareness_count
