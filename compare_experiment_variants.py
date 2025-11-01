@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Compare multiple experiment variants (suppression + steering) for a single model.
+Compare multiple experiment variants (suppression + steering + off-policy) for a single model.
 
 Generates comprehensive comparison plots showing:
 - Pareto frontiers for trade-off analysis
@@ -17,8 +17,17 @@ Usage:
         "remove_only:working/suppression_experiments/02_remove_only/..." \
       --steering-experiments \
         "tim_N4_S3.5:working/steered-outs/qwen_qwen3-32b/.../N4_S3.5" \
+      --off-policy-experiments \
+        "prefill_explicit:working/off-policy-intervention/qwen_qwen3-32b/explicit/prefill/explicit" \
       --mode v1 \
-      --output-dir outputs/experiment_comparison
+      --output-dir outputs/experiment_comparison \
+      --response-categorization-base-dir response_categorization
+
+Alternative response categorization:
+    Use --response-categorization-base-dir to specify alternative categorization directories:
+      --response-categorization-base-dir awareness_yes_no
+      --response-categorization-base-dir counterfactual_yes_no_unsure
+      --response-categorization-base-dir awareness_yes_no_unsure
 """
 
 import argparse
@@ -280,19 +289,48 @@ def standardize_steering_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df[keep_cols]
 
 
+def standardize_offpolicy_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Standardize off-policy columns to common names (similar to steering)."""
+    rename_map = {
+        'original_intensity': 'original_awareness',
+        'offpolicy_intensity': 'modified_awareness',
+        'deployment_intensity': 'deployment_awareness',
+        'offpolicy_choice': 'modified_choice',
+        'offpolicy_type': 'modified_type',
+        'offpolicy_bc': 'bc'
+    }
+
+    # Only rename columns that exist
+    rename_map = {k: v for k, v in rename_map.items() if k in df.columns}
+    df = df.rename(columns=rename_map)
+
+    # Extract seed from filename
+    df['seed'] = df['file'].apply(extract_seed_from_filename)
+
+    # Keep only relevant columns
+    keep_cols = ['file', 'prompt_id', 'seed', 'experiment', 'technique', 'experiment_name',
+                 'original_awareness', 'modified_awareness', 'deployment_awareness',
+                 'original_choice', 'modified_choice', 'deployment_choice',
+                 'original_type', 'modified_type', 'bc']
+
+    # Keep only columns that exist
+    keep_cols = [c for c in keep_cols if c in df.columns]
+    return df[keep_cols]
+
+
 def process_single_experiment(
-    exp_tuple: Tuple[str, str, Path, Path, str, str]
+    exp_tuple: Tuple[str, str, Path, Path, str, str, str]
 ) -> Tuple[bool, pd.DataFrame, str]:
     """
-    Process a single experiment (suppression or steering).
+    Process a single experiment (suppression, steering, or off-policy).
 
     Args:
-        exp_tuple: (exp_name, technique, exp_dir, output_data_dir, model, mode)
+        exp_tuple: (exp_name, technique, exp_dir, output_data_dir, model, mode, response_cat_base_dir)
 
     Returns:
         (success, df, exp_name)
     """
-    exp_name, technique, exp_dir, output_data_dir, model, mode = exp_tuple
+    exp_name, technique, exp_dir, output_data_dir, model, mode, response_cat_base_dir = exp_tuple
 
     try:
         if technique == 'suppression':
@@ -310,7 +348,7 @@ def process_single_experiment(
             df = standardize_suppression_columns(df)
             return (True, df, exp_name)
 
-        else:  # steering
+        elif technique == 'steering':
             csv_path = output_data_dir / f"steer_{exp_name}.csv"
 
             # Find working dir and build paths
@@ -328,7 +366,7 @@ def process_single_experiment(
             steered_cat_dir = working_dir / 'steered_categorization' / mode / model / rel_path
 
             # Original response categorizations for comparison
-            response_cat_dir = working_dir / 'response_categorization' / mode
+            response_cat_dir = working_dir / response_cat_base_dir / mode
 
             args = {
                 'categorization-dir': steered_cat_dir,
@@ -344,6 +382,42 @@ def process_single_experiment(
             df = standardize_steering_columns(df)
             return (True, df, exp_name)
 
+        else:  # off-policy
+            csv_path = output_data_dir / f"offpolicy_{exp_name}.csv"
+
+            # Find working dir and build paths
+            working_dir = exp_dir
+            while working_dir.name != 'working' and working_dir.parent != working_dir:
+                working_dir = working_dir.parent
+
+            # Get the relative path from working dir to exp_dir
+            # Off-policy paths are like: working/off-policy-intervention/{model}/explicit/prefill/explicit
+            try:
+                rel_path = exp_dir.relative_to(working_dir / 'off-policy-intervention' / model)
+            except ValueError:
+                rel_path = Path(*exp_dir.parts[-3:])
+
+            # Off-policy categorizations might be in a similar structure to steered
+            # This is a placeholder - adjust based on actual off-policy categorization structure
+            offpolicy_cat_dir = exp_dir
+
+            # Original response categorizations for comparison
+            response_cat_dir = working_dir / response_cat_base_dir / mode
+
+            args = {
+                'categorization-dir': offpolicy_cat_dir,
+                'response-categorization-dir': response_cat_dir,
+                'recursive': True,
+                'experiment-name': exp_name
+            }
+
+            run_analysis_script('analyze_steered_results.py', args, csv_path)
+            df = pd.read_csv(csv_path)
+            df['technique'] = 'off-policy'
+            df['experiment'] = exp_name
+            df = standardize_offpolicy_columns(df)
+            return (True, df, exp_name)
+
     except Exception as e:
         print(f"\n❌ ERROR processing {technique} experiment '{exp_name}':")
         print(f"   Error: {str(e)}")
@@ -352,9 +426,9 @@ def process_single_experiment(
         return (False, None, exp_name)
 
 
-def load_bucket_mapping(model: str, mode: str) -> Dict[str, str]:
+def load_bucket_mapping(model: str, mode: str, response_cat_base_dir: str = 'response_categorization') -> Dict[str, str]:
     """Load prompt_id → bucket mapping from high_awareness_bc_seeds.yaml."""
-    bucket_file = Path(f"working/response_categorization/{mode}/{model}/high_awareness_bc_seeds.yaml")
+    bucket_file = Path(f"working/{response_cat_base_dir}/{mode}/{model}/high_awareness_bc_seeds.yaml")
 
     if not bucket_file.exists():
         print(f"  ⚠️  Warning: Bucket file not found: {bucket_file}")
@@ -384,8 +458,10 @@ def collect_all_experiments(
     model: str,
     suppression_experiments: List[Tuple[str, Path]],
     steering_experiments: List[Tuple[str, Path]],
+    offpolicy_experiments: List[Tuple[str, Path]],
     output_data_dir: Path,
     mode: str,
+    response_cat_base_dir: str = 'response_categorization',
     limit_seeds: int = None
 ) -> pd.DataFrame:
     """Collect data from all experiment variants using parallel processing."""
@@ -400,11 +476,15 @@ def collect_all_experiments(
 
     # Add suppression experiments
     for exp_name, exp_dir in suppression_experiments:
-        experiment_tuples.append((exp_name, 'suppression', exp_dir, output_data_dir, model, mode))
+        experiment_tuples.append((exp_name, 'suppression', exp_dir, output_data_dir, model, mode, response_cat_base_dir))
 
     # Add steering experiments
     for exp_name, exp_dir in steering_experiments:
-        experiment_tuples.append((exp_name, 'steering', exp_dir, output_data_dir, model, mode))
+        experiment_tuples.append((exp_name, 'steering', exp_dir, output_data_dir, model, mode, response_cat_base_dir))
+
+    # Add off-policy experiments
+    for exp_name, exp_dir in offpolicy_experiments:
+        experiment_tuples.append((exp_name, 'off-policy', exp_dir, output_data_dir, model, mode, response_cat_base_dir))
 
     # Process experiments in parallel
     all_dfs = []
@@ -447,7 +527,7 @@ def collect_all_experiments(
 
     # Load and apply bucket mapping
     print("\n⚙️  Loading bucket mapping...")
-    bucket_mapping = load_bucket_mapping(model, mode)
+    bucket_mapping = load_bucket_mapping(model, mode, response_cat_base_dir)
     if bucket_mapping:
         combined_df['bucket'] = combined_df['prompt_id'].map(bucket_mapping)
         combined_df['bucket'] = combined_df['bucket'].fillna('unknown')
@@ -1778,18 +1858,27 @@ def main():
     parser = argparse.ArgumentParser(description='Compare experiment variants for a single model')
     parser.add_argument('--model', type=str, required=True,
                        help='Model name (e.g., qwen_qwen3-32b)')
-    parser.add_argument('--suppression-experiments', type=str, nargs='+', required=True,
+    parser.add_argument('--suppression-experiments', type=str, nargs='+', default=[],
                        help='Suppression experiments as "name:path" pairs')
-    parser.add_argument('--steering-experiments', type=str, nargs='+', required=True,
+    parser.add_argument('--steering-experiments', type=str, nargs='+', default=[],
                        help='Steering experiments as "name:path" pairs')
+    parser.add_argument('--off-policy-experiments', type=str, nargs='+', default=[],
+                       help='Off-policy experiments as "name:path" pairs')
     parser.add_argument('--mode', type=str, required=True, choices=['v0', 'v1'],
                        help='Version mode for categorization')
     parser.add_argument('--output-dir', type=str, required=True,
                        help='Output directory')
     parser.add_argument('--limit-seeds', type=int, default=None,
                        help='Limit to seeds 0-N (e.g., --limit-seeds 30 uses only seeds 0-30)')
+    parser.add_argument('--response-categorization-base-dir', type=str, default='response_categorization',
+                       help='Base directory for response categorizations (default: response_categorization). '
+                            'Use "awareness_yes_no", "counterfactual_yes_no_unsure", or "awareness_yes_no_unsure" for alternatives.')
 
     args = parser.parse_args()
+
+    # Validate that at least one experiment type is provided
+    if not args.suppression_experiments and not args.steering_experiments and not args.off_policy_experiments:
+        parser.error("At least one of --suppression-experiments, --steering-experiments, or --off-policy-experiments must be provided")
 
     # Parse experiment specifications
     supp_exps = []
@@ -1802,12 +1891,20 @@ def main():
         name, path = spec.split(':', 1)
         steer_exps.append((name, Path(path)))
 
+    offpolicy_exps = []
+    for spec in args.off_policy_experiments:
+        name, path = spec.split(':', 1)
+        offpolicy_exps.append((name, Path(path)))
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Collect data
     output_data_dir = output_dir / 'data'
-    combined_df = collect_all_experiments(args.model, supp_exps, steer_exps, output_data_dir, args.mode, args.limit_seeds)
+    combined_df = collect_all_experiments(
+        args.model, supp_exps, steer_exps, offpolicy_exps, output_data_dir,
+        args.mode, args.response_categorization_base_dir, args.limit_seeds
+    )
 
     # Compute metrics
     metrics_df = compute_experiment_metrics(combined_df)

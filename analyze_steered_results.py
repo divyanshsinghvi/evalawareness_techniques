@@ -788,10 +788,10 @@ def print_summary(results: List[Dict], bucket_data: Dict = None):
 
 def main():
     parser = argparse.ArgumentParser(description='Analyze steered response categorization results')
-    parser.add_argument('--categorization-dir', type=str, required=True,
-                       help='Directory containing categorized steered responses')
-    parser.add_argument('--response-categorization-dir', type=str, required=True,
-                       help='Directory containing original response categorizations for comparison')
+    parser.add_argument('--categorization-dir', type=str, required=False, default=None,
+                       help='Directory containing categorized steered responses (optional)')
+    parser.add_argument('--response-categorization-dir', type=str, required=False, default=None,
+                       help='Directory containing original response categorizations for comparison (optional)')
     parser.add_argument('--bucket-file', type=str,
                        help='Bucket file for per-prompt breakdown (e.g., working/response_categorization/model/high_awareness_bc_seeds.yaml)')
     parser.add_argument('--recursive', action='store_true',
@@ -811,26 +811,42 @@ def main():
 
     args = parser.parse_args()
 
-    categorization_dir = Path(args.categorization_dir)
-    response_categorization_dir = Path(args.response_categorization_dir)
+    categorization_dir = Path(args.categorization_dir) if args.categorization_dir else None
+    response_categorization_dir = Path(args.response_categorization_dir) if args.response_categorization_dir else None
 
-    if not categorization_dir.exists():
+    # Require at least one directory
+    if not categorization_dir and not response_categorization_dir:
+        print("Error: At least one of --categorization-dir or --response-categorization-dir must be provided")
+        return 1
+
+    # Validate categorization directory if provided
+    if categorization_dir and not categorization_dir.exists():
         print(f"Error: {categorization_dir} not found")
         return 1
 
-    if not response_categorization_dir.exists():
+    # Validate response categorization directory if provided
+    if response_categorization_dir and not response_categorization_dir.exists():
         print(f"Error: {response_categorization_dir} not found")
         return 1
 
-    # Find all categorization files
-    if args.recursive:
-        files = list(categorization_dir.rglob('*_steer_out.yaml'))
-    else:
-        files = list(categorization_dir.glob('*_steer_out.yaml'))
+    # Print mode information
+    if not categorization_dir:
+        print("Note: Running without steered categorization directory - only baseline response analysis")
+    elif not response_categorization_dir:
+        print("Note: Running without response categorization directory - awareness comparisons will be skipped")
 
-    if not files:
-        print(f"No categorization files found in {categorization_dir}")
-        return 1
+    # Find all categorization files
+    if categorization_dir:
+        if args.recursive:
+            files = list(categorization_dir.rglob('*_steer_out.yaml'))
+        else:
+            files = list(categorization_dir.glob('*_steer_out.yaml'))
+
+        if not files:
+            print(f"No categorization files found in {categorization_dir}")
+            return 1
+    else:
+        files = []
 
     print(f"Found {len(files)} categorized steered response files")
 
